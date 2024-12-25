@@ -10,7 +10,17 @@ import torch
 import torchaudio
 from torchaudio.transforms import Resample
 
-from datasets import Audio, load_dataset, load_from_disk, concatenate_datasets, Dataset, DatasetDict
+from datasets import (
+    Audio,
+    load_dataset,
+    load_from_disk,
+    concatenate_datasets,
+    Dataset,
+    DatasetDict,
+    Features,
+    Sequence,
+    Value,
+)
 from functools import partial
 
 from transformers import WhisperProcessor
@@ -36,6 +46,9 @@ def parse_arguments():
     parser.add_argument("--save_processed", help="Dataset name to save processed data (will save both train and eval)")
     parser.add_argument(
         "--use_preprocessed", help="Dataset name to load preprocessed data from (either local path or remote dataset)"
+    )
+    parser.add_argument(
+        "--ds_processor_proc_num", type=int, default=1, help="Number of parallel processors for datasets preparation"
     )
     parser.add_argument("--model_name", default="openai/whisper-large-v2", help="Name of the model to train")
     parser.add_argument("--output_model_name", required=True, help="Name of the fine-tuned model to generate")
@@ -98,10 +111,12 @@ class DatasetPreparator:
         tokenizer_time_precision=0.02,
         timestamp_sample_prob=0.5,
         seed: np.random.RandomState = None,
+        proc_num: int = 1,
     ):
         self.seed = np.random.default_rng() if seed is None else seed
         self.processor = processor
         self.tokenizer = processor.tokenizer
+        self.proc_num = proc_num
         self.target_sampling_rate = self.processor.feature_extractor.sampling_rate
         self.tokenizer_time_precision = tokenizer_time_precision
         self.timestamp_begin_token_id = self.tokenizer.convert_tokens_to_ids("<|notimestamps|>") + 1
@@ -109,6 +124,15 @@ class DatasetPreparator:
         self.total_timestamp_tokens = self.last_timestamp_token - self.timestamp_begin_token_id + 1
         self.max_allowed_tokenized_timestamp = (self.total_timestamp_tokens - 1) * self.tokenizer_time_precision
         self.timestamp_sample_prob = timestamp_sample_prob
+
+        # Prepare the output features - to ensure optimal storage during mapping (uses disk cache for mapped content)
+        self.output_features = Features(
+            {
+                "input_features": Sequence(feature=Sequence(feature=Sequence(feature=Value(dtype="float32")))),
+                "labels": Sequence(feature=Value(dtype="int32")),
+                "input_length": Value("float64"),
+            }
+        )
 
     def _get_token_timestamp_for_time(self, time: float) -> int:
 
@@ -184,7 +208,13 @@ class DatasetPreparator:
                 return None
 
         dataset = dataset.cast_column("audio", Audio(sampling_rate=self.target_sampling_rate))
-        processed_dataset = dataset.map(prepare_example_fn, remove_columns=dataset.column_names, num_proc=1)
+
+        processed_dataset = dataset.map(
+            prepare_example_fn,
+            remove_columns=dataset.column_names,
+            num_proc=self.proc_num,
+            features=self.output_features,
+        )
         processed_dataset = self._select_legal_entries(processed_dataset)
         return processed_dataset
 
@@ -279,7 +309,7 @@ def main():
         raise ValueError("Cannot use preprocessed data and save preprocessed data at the same time.")
 
     processor = WhisperProcessor.from_pretrained(args.model_name, language="hebrew", task="transcribe")
-    preparator = DatasetPreparator(processor)
+    preparator = DatasetPreparator(processor, proc_num=args.ds_processor_proc_num)
 
     if args.use_preprocessed:
         try:
