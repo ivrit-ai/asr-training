@@ -113,7 +113,8 @@ class DatasetPreparator:
         seed: np.random.RandomState = None,
         proc_num: int = 1,
     ):
-        self.seed = np.random.default_rng() if seed is None else seed
+        # Stability of the seed will allow reusing cached processing
+        self.seed = np.random.default_rng(998) if seed is None else seed
         self.processor = processor
         self.tokenizer = processor.tokenizer
         self.proc_num = proc_num
@@ -151,71 +152,74 @@ class DatasetPreparator:
 
         return processed_dataset.select(indices)
 
+    def _prepare_example_fn(self, example, text_column_name):
+        try:
+            audio = example["audio"]
+            original_sampling_rate = audio["sampling_rate"]
+            target_sampling_rate = self.target_sampling_rate
+
+            if original_sampling_rate != target_sampling_rate:
+                resampler = Resample(orig_freq=original_sampling_rate, new_freq=target_sampling_rate)
+                audio_array = torch.tensor(audio["array"]).float()
+                resampled_audio_array = resampler(audio_array).numpy()
+            else:
+                resampled_audio_array = audio["array"]
+
+            text = example[text_column_name]  # Assume no timestamps text are in the text.
+            result_example = self.processor(
+                audio=resampled_audio_array,
+                sampling_rate=target_sampling_rate,
+                text=text,
+                # Motivation: sometimes post-training models glue words together.
+                add_prefix_space=True,
+            )
+
+            can_add_timestamps = (
+                # Currently - we assume our DS has proper durations and we can inject timestamps
+                # If the dataset contains long segments which include silences - this may require
+                # VAD preprocessing to get high quality timestamps
+                True
+            )
+            should_train_on_timestamps = bool(self.seed.binomial(1, self.timestamp_sample_prob))
+            if can_add_timestamps and should_train_on_timestamps:
+                # The tokenizer is going to add, by default - the "notimestamps" token.
+                text_input_ids = result_example["labels"]
+
+                # 0 - <|startoftranscript|>, 1 - Lang, 2 - Task, 3 - No TS
+                text_input_ids[3] = self._get_token_timestamp_for_time(
+                    0.0
+                )  # Replace the no timestamps token with the timestamp token for time 0.0.
+                duration = example["extra_data"]["duration"]
+
+                # Right before the end (<|endoftext|>) token, add a timestamp token for the duration of the audio.
+                text_input_ids.insert(-1, self._get_token_timestamp_for_time(duration))
+
+                # Text token decode side processing as the prediction labels
+                result_example["labels"] = text_input_ids
+
+                # TODO - Ensure labels target length is not overflowing the allowed limit.
+                # Possibly this is checked downstream - ensure.
+
+            result_example["input_length"] = len(resampled_audio_array) / target_sampling_rate
+
+            return result_example
+        except Exception as e:
+            print(f"Exception: {e}")
+            return None
+
     def prepare_dataset(self, dataset: Dataset, text_column_name):
-        def prepare_example_fn(example):
-            try:
-                audio = example["audio"]
-                original_sampling_rate = audio["sampling_rate"]
-                target_sampling_rate = self.target_sampling_rate
-
-                if original_sampling_rate != target_sampling_rate:
-                    resampler = Resample(orig_freq=original_sampling_rate, new_freq=target_sampling_rate)
-                    audio_array = torch.tensor(audio["array"]).float()
-                    resampled_audio_array = resampler(audio_array).numpy()
-                else:
-                    resampled_audio_array = audio["array"]
-
-                text = example[text_column_name]  # Assume no timestamps text are in the text.
-                result_example = self.processor(
-                    audio=resampled_audio_array,
-                    sampling_rate=target_sampling_rate,
-                    text=text,
-                    # Motivation: sometimes post-training models glue words together.
-                    add_prefix_space=True,
-                )
-
-                can_add_timestamps = (
-                    # Currently - we assume our DS has proper durations and we can inject timestamps
-                    # If the dataset contains long segments which include silences - this may require
-                    # VAD preprocessing to get high quality timestamps
-                    True
-                )
-                should_train_on_timestamps = bool(self.seed.binomial(1, self.timestamp_sample_prob))
-                if can_add_timestamps and should_train_on_timestamps:
-                    # The tokenizer is going to add, by default - the "notimestamps" token.
-                    text_input_ids = result_example["labels"]
-
-                    # 0 - <|startoftranscript|>, 1 - Lang, 2 - Task, 3 - No TS
-                    text_input_ids[3] = self._get_token_timestamp_for_time(
-                        0.0
-                    )  # Replace the no timestamps token with the timestamp token for time 0.0.
-                    duration = example["extra_data"]["duration"]
-
-                    # Right before the end (<|endoftext|>) token, add a timestamp token for the duration of the audio.
-                    text_input_ids.insert(-1, self._get_token_timestamp_for_time(duration))
-
-                    # Text token decode side processing as the prediction labels
-                    result_example["labels"] = text_input_ids
-
-                    # TODO - Ensure labels target length is not overflowing the allowed limit.
-                    # Possibly this is checked downstream - ensure.
-
-                result_example["input_length"] = len(resampled_audio_array) / target_sampling_rate
-
-                return result_example
-            except Exception as e:
-                print(f"Exception: {e}")
-                return None
 
         dataset = dataset.cast_column("audio", Audio(sampling_rate=self.target_sampling_rate))
 
         processed_dataset = dataset.map(
-            prepare_example_fn,
+            lambda x: self._prepare_example_fn(x, text_column_name),
             remove_columns=dataset.column_names,
             num_proc=self.proc_num,
             features=self.output_features,
         )
+
         processed_dataset = self._select_legal_entries(processed_dataset)
+
         return processed_dataset
 
 
