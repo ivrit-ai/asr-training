@@ -25,15 +25,14 @@ from functools import partial
 
 from transformers import WhisperProcessor
 from transformers.models.whisper.english_normalizer import BasicTextNormalizer
-from transformers import WhisperForConditionalGeneration
+from transformers import WhisperForConditionalGeneration, BitsAndBytesConfig
 from transformers import Seq2SeqTrainingArguments
 from transformers import Seq2SeqTrainer
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Union
 
-from peft import prepare_model_for_kbit_training, LoraConfig, PeftModel, LoraModel, LoraConfig, get_peft_model
-from peft import prepare_model_for_kbit_training
+from peft import prepare_model_for_kbit_training, PeftModel, LoraModel, LoraConfig, get_peft_model
 
 
 def parse_arguments():
@@ -67,6 +66,7 @@ def parse_arguments():
         "--gradient_accumulation_steps", type=int, default=2, help="Number of gradient accumulation steps"
     )
     parser.add_argument("--weight_decay", type=float, default=0.05, help="Weight decay")
+    parser.add_argument("--eval_steps", type=int, help="Number of steps between two evals, if not specified defaults to logging_steps.")
     parser.add_argument("--save_steps", type=int, default=500, help="Number of steps between each model save/upload.")
     parser.add_argument("--max_eval_set_size", type=int, help="Maximum number of entries to fetch from eval dataset.")
 
@@ -290,12 +290,15 @@ def compute_metrics(pred, processor, metric, normalizer):
 def prepare_model_for_qlora(model):
     model = prepare_model_for_kbit_training(model)
 
-    def make_inputs_require_grad(module, input, output):
-        output.requires_grad_(True)
-
-    model.model.encoder.conv1.register_forward_hook(make_inputs_require_grad)
-
-    config = LoraConfig(r=32, lora_alpha=64, target_modules=["q_proj", "v_proj"], lora_dropout=0.05, bias="none")
+    config = LoraConfig(
+        r=64,
+        lora_alpha=1,
+        use_rslora=True,
+        target_modules=["q_proj", "k_proj", "v_proj", "fc1", "fc2", "out_proj"],
+        # modules_to_save=["embed_tokens"],
+        lora_dropout=0.05,
+        bias="none",
+    )
 
     model = get_peft_model(model, config)
     model.print_trainable_parameters()
@@ -358,7 +361,12 @@ def main():
     metric = evaluate.load("wer")
     normalizer = BasicTextNormalizer()
 
-    model = WhisperForConditionalGeneration.from_pretrained(args.model_name)
+    if args.use_qlora:
+        model = WhisperForConditionalGeneration.from_pretrained(args.model_name, quantization_config=BitsAndBytesConfig(load_in_8bit=True))
+    else:
+        model = WhisperForConditionalGeneration.from_pretrained(args.model_name)
+    model.config.forced_decoder_ids = None
+    model.config.suppress_tokens = []
 
     assert (
         model.config.max_target_positions == whisper_max_target_positions
@@ -368,6 +376,7 @@ def main():
         model = prepare_model_for_qlora(model)
 
     model.config.use_cache = False
+
     model.generate = partial(model.generate, language="hebrew", task="transcribe", use_cache=True)
 
     training_args = Seq2SeqTrainingArguments(
@@ -376,9 +385,10 @@ def main():
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
         lr_scheduler_type="constant_with_warmup",
-        warmup_ratio=args.warmup_ratio,
+        warmup_ratio=args.warmup_ratio,  # Overidden by warmup_steps - So cannot really use this?
         warmup_steps=args.warmup_steps,
         eval_strategy="steps",
+        eval_steps=args.eval_steps,
         save_strategy="steps",
         num_train_epochs=args.num_train_epochs,
         weight_decay=args.weight_decay,
@@ -404,7 +414,7 @@ def main():
         eval_dataset=eval_set,
         data_collator=data_collator,
         compute_metrics=lambda pred: compute_metrics(pred, processor, metric, normalizer),
-        tokenizer=processor,
+        processing_class=processor,
     )
 
     print("Start training!")
