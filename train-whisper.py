@@ -90,12 +90,25 @@ dataset_spec_split_pattern = r":(?=(?:[^\[\]]|\[[^\[\]]*\])*$)"
 def load_datasets(dataset_specs):
     datasets = []
     for spec in dataset_specs:
+        spec_version = None
+        dataset_format_version = None
+        text_column = None
+        if spec.endswith("#v2"):
+            spec_version = "v2"
+            dataset_format_version = "v2"
+            spec = spec[:-3]
+
         parts = re.split(dataset_spec_split_pattern, spec)
+
         dataset_name = parts[0]
-        split = parts[1] if len(parts) > 2 else "train"
-        text_column = parts[-1]
+        if spec_version == "v2":
+            split = parts[1]
+        else:
+            split = parts[1] if len(parts) > 2 else "train"
+            text_column = parts[-1]
+
         dataset = load_dataset(dataset_name, split=split)
-        datasets.append((dataset, text_column))
+        datasets.append((dataset, text_column, dataset_format_version))
     return datasets
 
 
@@ -114,13 +127,14 @@ class DatasetPreparator:
         # Don't change this for Whisper
         tokenizer_time_precision=0.02,
         timestamp_sample_prob=0.5,
+        condition_on_prev_sample_prob=0.5,
         seed: np.random.RandomState = None,
         proc_num: int = 1,
         device: str = "cpu",
     ):
-        if proc_num > 1: # Parallel processing will not work in multi threaded env.
+        if proc_num > 1:  # Parallel processing will not work in multi threaded env.
             torch.set_num_threads(1)
-        
+
         # Stability of the seed will allow reusing cached processing
         self.seed = np.random.default_rng(998) if seed is None else seed
         self.device = device
@@ -129,11 +143,24 @@ class DatasetPreparator:
         self.proc_num = proc_num
         self.target_sampling_rate = self.processor.feature_extractor.sampling_rate
         self.tokenizer_time_precision = tokenizer_time_precision
-        self.timestamp_begin_token_id = self.tokenizer.convert_tokens_to_ids("<|notimestamps|>") + 1
+
+        orig_predict_timestamps = self.processor.tokenizer.predict_timestamps
+        self.processor.tokenizer.set_prefix_tokens(predict_timestamps=False)
+        self.prefix_tokens_no_ts = self.processor.tokenizer.prefix_tokens
+        self.processor.tokenizer.set_prefix_tokens(predict_timestamps=True)
+        self.prefix_tokens_with_ts = self.processor.tokenizer.prefix_tokens
+        self.processor.tokenizer.set_prefix_tokens(predict_timestamps=orig_predict_timestamps)
+
+        self.eot_token_id = self.tokenizer.convert_tokens_to_ids("<|endoftext|>")
+        self.start_of_prev_token_id = self.tokenizer.convert_tokens_to_ids("<|startofprev|>")
+        self.no_timestamp_token_id = self.tokenizer.convert_tokens_to_ids("<|notimestamps|>")
+        self.timestamp_begin_token_id = self.no_timestamp_token_id + 1
         self.last_timestamp_token = self.tokenizer.total_vocab_size - 1
         self.total_timestamp_tokens = self.last_timestamp_token - self.timestamp_begin_token_id + 1
         self.max_allowed_tokenized_timestamp = (self.total_timestamp_tokens - 1) * self.tokenizer_time_precision
+        self.prev_ids_max_length = whisper_max_target_positions // 2
         self.timestamp_sample_prob = timestamp_sample_prob
+        self.condition_on_prev_sample_prob = condition_on_prev_sample_prob
 
         # Prepare the output features - to ensure optimal storage during mapping (uses disk cache for mapped content)
         self.output_features = Features(
@@ -159,127 +186,170 @@ class DatasetPreparator:
             lambda labels: len(labels) <= whisper_max_target_positions, input_columns="labels"
         )
 
-    def _prepare_example_fn(self, example, text_column_name):
-        is_batched = isinstance(example["audio"], (list, tuple))
-        try:
-            audio_batched = example["audio"]
-            if not is_batched:
-                audio_batched = [audio_batched]
+    def _prepare_example_audio(self, is_batched, example, result_example: BatchFeature) -> None:
+        audio_batched = example["audio"]
+        if not is_batched:
+            audio_batched = [audio_batched]
 
-            resampled_audio = []
-            for audio in audio_batched:
-                original_sampling_rate = audio["sampling_rate"]
-                target_sampling_rate = self.target_sampling_rate
+        resampled_audio = []
+        for audio in audio_batched:
+            original_sampling_rate = audio["sampling_rate"]
+            target_sampling_rate = self.target_sampling_rate
 
-                if original_sampling_rate != target_sampling_rate:
-                    resampler = Resample(orig_freq=original_sampling_rate, new_freq=target_sampling_rate)
-                    audio_array = torch.tensor(audio["array"]).float()
-                    resampled_audio_array = resampler(audio_array).numpy()
-                else:
-                    resampled_audio_array = audio["array"]
+            if original_sampling_rate != target_sampling_rate:
+                resampler = Resample(orig_freq=original_sampling_rate, new_freq=target_sampling_rate)
+                audio_array = torch.tensor(audio["array"]).float()
+                resampled_audio_array = resampler(audio_array).numpy()
+            else:
+                resampled_audio_array = audio["array"]
 
-                resampled_audio.append(resampled_audio_array)
+            resampled_audio.append(resampled_audio_array)
 
-            text = example[text_column_name]  # Assume no timestamps tokens are in the text.
-            tokenizer_result = self.processor.tokenizer(
-                text,
-                # Motivation: sometimes post-training models glue words together.
-                add_prefix_space=True,
-                return_attention_mask=False,
-            )
-            # Ensure proper naming of the output features
-            # As if we caleled the processoer with an audio param.
-            # This is a very weird API quirk, but it's what the processor produces so we need to adapt.
-            result_example = BatchFeature({"labels": tokenizer_result["input_ids"]})
+        # We want to use the device kwargs - we call the feature extractor directly
+        # to avoid warning from the tokenizer (which does not know how to consume a device kwarg)
+        feature_extraction_result = self.processor.feature_extractor(
+            resampled_audio, sampling_rate=target_sampling_rate, return_attention_mask=True, device=self.device
+        )
 
-            # We want to use the device kwargs - we call the feature extractor directly
-            # to avoid warning from the tokenizer (which does not know how to consume a device kwarg)
-            feature_extraction_result = self.processor.feature_extractor(
-                resampled_audio, sampling_rate=target_sampling_rate, return_attention_mask=True, device=self.device
-            )
+        input_feat = feature_extraction_result["input_features"]
+        attn_mask = feature_extraction_result["attention_mask"]
 
-            input_feat = feature_extraction_result["input_features"]
-            attn_mask = feature_extraction_result["attention_mask"]
+        input_features_to_keep = []
+        pad_values = []
+        pad_amounts = []
+        for input_feat_sample, attn_mask_sample in zip(input_feat, attn_mask):
+            # Only makes sense to compress when we have at least 2 paddings to replace with 1
+            if attn_mask_sample[-3] == 0:
+                # +1 because the STFT window overflows slightly into the first silence padding frame
+                # And the model might learned to use that signal to recognize start of silence.
+                padding_starts_at_index = attn_mask_sample.argmin() + 1
+                padding_vals = input_feat_sample.T[padding_starts_at_index]
+                pad_values.append(padding_vals)
+                input_feat_keep = input_feat_sample.T[:padding_starts_at_index].T
+                input_features_to_keep.append(input_feat_keep)
+                orig_out_features_length = input_feat_sample.shape[-1]
+                pad_amounts.append(np.int32(orig_out_features_length - padding_starts_at_index))
+            else:
+                input_features_to_keep.append(input_feat_sample)
+                pad_values.append(np.array([], dtype=input_feat_sample.dtype))
+                pad_amounts.append(np.int32(0))
 
-            input_features_to_keep = []
-            pad_values = []
-            pad_amounts = []
-            for input_feat_sample, attn_mask_sample in zip(input_feat, attn_mask):
-                # Only makes sense to compress when we have 2 paddings to replace with 1
-                if attn_mask_sample[-3] == 0:
-                    # +1 because the STFT window overflows slightly into the first silence padding frame
-                    # And the model might learned to use that signal to recognize start of silence.
-                    padding_starts_at_index = attn_mask_sample.argmin() + 1
-                    padding_vals = input_feat_sample.T[padding_starts_at_index]
-                    pad_values.append(padding_vals)
-                    input_feat_keep = input_feat_sample.T[:padding_starts_at_index].T
-                    input_features_to_keep.append(input_feat_keep)
-                    orig_out_features_length = input_feat_sample.shape[-1]
-                    pad_amounts.append(orig_out_features_length - padding_starts_at_index)
-                else:
-                    input_features_to_keep.append(input_feat_sample)
-                    pad_values.append([])
-                    pad_amounts.append(0)
+        if not is_batched:
+            input_features_to_keep = input_features_to_keep[0]
+            pad_values = pad_values[0]
+            pad_amounts = pad_amounts[0]
+        result_example["input_features"] = input_features_to_keep
+        result_example["pad_value"] = pad_values
+        result_example["pad_amount"] = pad_amounts
 
-            if not is_batched:
-                input_features_to_keep = input_features_to_keep[0]
-                pad_values = pad_values[0]
-                pad_amounts = pad_amounts[0]
-            result_example["input_features"] = input_features_to_keep
-            result_example["pad_value"] = pad_values
-            result_example["pad_amount"] = pad_amounts
+        input_lengths = [len(resampled_audio_array) / target_sampling_rate for resampled_audio_array in resampled_audio]
+        if not is_batched:
+            input_lengths = input_lengths[0]
+        result_example["input_length"] = input_lengths
 
-            input_lengths = [
-                len(resampled_audio_array) / target_sampling_rate for resampled_audio_array in resampled_audio
-            ]
-            if not is_batched:
-                input_lengths = input_lengths[0]
-            result_example["input_length"] = input_lengths
+    def _prepare_example_text(self, is_batched, example, result_example, text_column_name, format_version) -> None:
+        # Currently v2 format contains timestampped data and the prev transcript to condition on
+        is_v2_format = format_version == "v2"
+        can_add_timestamps = False
+        prev_text_column_name = None
+        tokenizer_kwargs = dict(
+            add_special_tokens=True,
+            # Motivation: sometimes post-training models glue words together.
+            add_prefix_space=True,
+            return_attention_mask=False,
+        )
+        if is_v2_format:
+            text_column_name = "transcript"
+            prev_text_column_name = "prev_transcript"
+            tokenizer_kwargs["add_special_tokens"] = False
+            tokenizer_kwargs["add_prefix_space"] = False  # v2 preformatted the text
 
-            can_add_timestamps = (
-                # Currently - we assume our DS has proper durations and we can inject timestamps
-                # If the dataset contains long segments which include silences - this may require
-                # VAD preprocessing to get high quality timestamps
-                True
-            )
+        text = example[text_column_name]  # Text may contain timestamps
 
-            labels_before_timestamps = result_example["labels"]
-            extra_datas = example["extra_data"]
-            if not is_batched:
-                labels_before_timestamps = [labels_before_timestamps]
-                extra_datas = [extra_datas]
+        tokenizer_result = self.processor.tokenizer(
+            text,
+            **tokenizer_kwargs,
+        )
 
+        if is_v2_format:
+            can_add_timestamps = True  # For now assume v2 format always has timestamps
             result_example_labels = []
-            for labels_sample, extra_data in zip(labels_before_timestamps, extra_datas):
+            token_ids_batch = tokenizer_result["input_ids"]
+            prev_text_batch = example[prev_text_column_name]
+            has_prev_batch = example["has_prev"]
+
+            if not is_batched:
+                token_ids_batch = [token_ids_batch]
+                prev_text_batch = [prev_text_batch]
+                has_prev_batch = [has_prev_batch]
+
+            for token_ids, prev_text, has_prev in zip(token_ids_batch, prev_text_batch, has_prev_batch):
+
                 should_train_on_timestamps = bool(self.seed.binomial(1, self.timestamp_sample_prob))
-                if can_add_timestamps and should_train_on_timestamps:
-                    # The tokenizer is going to add, by default - the "notimestamps" token.
-                    text_input_ids = labels_sample
+                should_condition_on_prev = bool(self.seed.binomial(1, self.condition_on_prev_sample_prob))
 
-                    # 0 - <|startoftranscript|>, 1 - Lang, 2 - Task, 3 - No TS
-                    text_input_ids[3] = self._get_token_timestamp_for_time(
-                        0.0
-                    )  # Replace the no timestamps token with the timestamp token for time 0.0.
-                    duration = extra_data["duration"]
+                if can_add_timestamps and not should_train_on_timestamps:
+                    # Remove all timestamp tokens
+                    token_ids = [token_id for token_id in token_ids if token_id < self.timestamp_begin_token_id]
+                    # Note - no-timestamp token id is prepended as part of the prefix later.
 
-                    # Right before the end (<|endoftext|>) token, add a timestamp token for the duration of the audio.
-                    text_input_ids.insert(-1, self._get_token_timestamp_for_time(duration))
+                prev_ids = []
+                if should_condition_on_prev and has_prev:
+                    prev_ids = self.processor.tokenizer(
+                        prev_text,
+                        **tokenizer_kwargs,
+                    )["input_ids"]
 
-                    # Text token decode side processing as the prediction labels
-                    labels_sample = text_input_ids
+                    if not should_train_on_timestamps:
+                        prev_ids = [token_id for token_id in prev_ids if token_id < self.timestamp_begin_token_id]
 
-                result_example_labels.append(labels_sample)
+                    # Calculate how manh prev_ids we want to take
+                    max_prev_ids_len_to_take = min(
+                        whisper_max_target_positions - len(token_ids)
+                        # 3 - Prefix for transcription (sot+lang+task)
+                        # 1 - eot token
+                        # 1 - Prefix for prev (prev)
+                        - 5,
+                        # And anyway no more than half the max size
+                        self.prev_ids_max_length,
+                    )
+
+                    # Take as much as we can from the prev_ids
+                    prev_ids = prev_ids[-max_prev_ids_len_to_take:]
+
+                    # prepend a prev token
+                    prev_ids = [self.start_of_prev_token_id] + prev_ids
+
+                with_timestamps = can_add_timestamps and should_train_on_timestamps
+                prefix_tokens = self.prefix_tokens_with_ts if with_timestamps else self.prefix_tokens_no_ts
+                all_input_ids = prev_ids + prefix_tokens + token_ids + [self.eot_token_id]
+
+                result_example_labels.append(all_input_ids)
 
             if not is_batched:
                 result_example_labels = result_example_labels[0]
+
             result_example["labels"] = result_example_labels
+        else:
+            result_example["labels"] = tokenizer_result["input_ids"]
+
+    def _prepare_example_fn(self, example, text_column_name, format_version):
+        is_batched = isinstance(example["audio"], (list, tuple))
+        try:
+            # Ensure proper naming of the output features
+            # As if we called the processoer with an audio param.
+            # This is a very weird API quirk, but it's what the processor produces so we need to adapt.
+            result_example = BatchFeature({})
+
+            self._prepare_example_audio(is_batched, example, result_example)
+            self._prepare_example_text(is_batched, example, result_example, text_column_name, format_version)
 
             return result_example
         except Exception as e:
             print(f"Exception: {e}")
             return None
 
-    def prepare_dataset(self, dataset: Dataset, text_column_name, batch_size: int = 1):
+    def prepare_dataset(self, dataset: Dataset, text_column_name, format_version: str | None, batch_size: int = 1):
 
         dataset = dataset.cast_column("audio", Audio(sampling_rate=self.target_sampling_rate))
 
@@ -291,9 +361,9 @@ class DatasetPreparator:
         if isinstance(dataset, DatasetDict):
             any_split_name = next(iter(columns_to_remove.keys()))
             columns_to_remove = dataset[any_split_name].column_names
-        
+
         processed_dataset = dataset.map(
-            lambda x: self._prepare_example_fn(x, text_column_name),
+            lambda x: self._prepare_example_fn(x, text_column_name, format_version),
             remove_columns=columns_to_remove,
             num_proc=self.proc_num,
             features=self.output_features,
@@ -304,9 +374,11 @@ class DatasetPreparator:
 
         return processed_dataset
 
+
 def process_datasets(datasets, preparator: DatasetPreparator):
     processed_datasets = [
-        preparator.prepare_dataset(dataset=dataset, text_column_name=text_column) for dataset, text_column in datasets
+        preparator.prepare_dataset(dataset=dataset, text_column_name=text_column, format_version=dataset_format_version)
+        for dataset, text_column, dataset_format_version in datasets
     ]
     return concatenate_datasets(processed_datasets) if len(processed_datasets) > 1 else processed_datasets[0]
 
@@ -321,13 +393,13 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         for feature in features:
             pad_amount = feature.get("pad_amount", 0)
             if pad_amount > 0:
-                pad_value = feature["pad_value"] # (d)
-                pad_tensor = torch.tensor([pad_value] * pad_amount).T # (d, pad_amount)
-                base_features = torch.tensor(feature["input_features"]) # (d, feat_len)
-                final_features = torch.concatenate([base_features, pad_tensor], dim=-1) # (d, feat_len + pad_amount)
+                pad_value = feature["pad_value"]  # (d)
+                pad_tensor = torch.tensor([pad_value] * pad_amount).T  # (d, pad_amount)
+                base_features = torch.tensor(feature["input_features"])  # (d, feat_len)
+                final_features = torch.concatenate([base_features, pad_tensor], dim=-1)  # (d, feat_len + pad_amount)
                 input_features.append(final_features)
 
-        batch = BatchFeature({ "input_features": torch.stack(input_features) })
+        batch = BatchFeature({"input_features": torch.stack(input_features)})
 
         label_features = [{"input_ids": feature["labels"]} for feature in features]
         labels_batch = self.processor.tokenizer.pad(label_features, return_tensors="pt")
@@ -498,7 +570,7 @@ def main():
         push_to_hub=(not args.skip_push_to_hub),
         run_name=args.run_name,
         hub_model_id=f"{args.hf_org_name}/{args.output_model_name}",
-        remove_unused_columns=False
+        remove_unused_columns=False,
     )
 
     trainer = Seq2SeqTrainer(
@@ -512,7 +584,7 @@ def main():
     )
 
     print("Start training!")
-    trainer.train(resume_from_checkpoint = args.resume_from_checkpoint)
+    trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
     # Save the model
     trainer.save_model(args.output_model_name)
