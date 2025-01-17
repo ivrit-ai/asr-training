@@ -398,6 +398,8 @@ class DataCollatorSpeechSeq2SeqWithPadding:
                 base_features = torch.tensor(feature["input_features"])  # (d, feat_len)
                 final_features = torch.concatenate([base_features, pad_tensor], dim=-1)  # (d, feat_len + pad_amount)
                 input_features.append(final_features)
+            else:
+                input_features.append(torch.tensor(feature["input_features"]))
 
         batch = BatchFeature({"input_features": torch.stack(input_features)})
 
