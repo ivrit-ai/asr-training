@@ -564,14 +564,14 @@ def main():
         generation_max_length=model.config.max_target_positions,
         logging_strategy="steps",
         logging_steps=args.logging_steps,
-        save_steps=500,
+        save_steps=args.save_steps,
         report_to="all",
         load_best_model_at_end=False,
         metric_for_best_model="wer",
         greater_is_better=False,
         push_to_hub=(not args.skip_push_to_hub),
         run_name=args.run_name,
-        hub_model_id=f"{args.hf_org_name}/{args.output_model_name}",
+        hub_model_id=f"{args.hf_org_name}/{args.output_model_name}" if not args.skip_push_to_hub else None,
         remove_unused_columns=False,
     )
 
