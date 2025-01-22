@@ -57,11 +57,22 @@ def parse_arguments():
         "--eval_dataset",
         help="Reference dataset for evaluation. Format: dataset_name[:split_name]:text_column",
     )
-    parser.add_argument("--resume_from_checkpoint", action="store_true", help="Try and resue for last saved checkpoint")
+    parser.add_argument(
+        "--resume_from_checkpoint", action="store_true", help="Try and resuming for last saved checkpoint"
+    )
+    parser.add_argument(
+        "--resume_from_checkpoint_path", type=str, help="Path to checkpoint to resume from", default=None
+    )
+    parser.add_argument(
+        "--ignore_data_skip", action="store_true", help="Ignore data skip when resuming from checkpoint"
+    )
     parser.add_argument("--use_qlora", action="store_true", help="Use QLoRA for training")
     parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate")
     parser.add_argument("--warmup_ratio", type=float, default=0.1, help="Warmup ratio")
     parser.add_argument("--num_train_epochs", type=int, default=10, help="Number of training epochs")
+    parser.add_argument(
+        "--max_steps", type=int, default=-1, help="How many steps to train for - overrides num_train_epochs"
+    )
     parser.add_argument("--warmup_steps", type=int, default=500, help="Number of warmup steps")
     parser.add_argument(
         "--gradient_accumulation_steps", type=int, default=2, help="Number of gradient accumulation steps"
@@ -558,6 +569,7 @@ def main():
         eval_steps=args.eval_steps,
         save_strategy="steps",
         num_train_epochs=args.num_train_epochs,
+        max_steps=args.max_steps,
         weight_decay=args.weight_decay,
         per_device_eval_batch_size=args.per_device_eval_batch_size,
         predict_with_generate=True,
@@ -585,8 +597,18 @@ def main():
         processing_class=processor,
     )
 
+    resume_from_checkpoint = False
+    if args.resume_from_checkpoint:
+        print("Resuming from checkpoint...")
+        resume_from_checkpoint = True
+        if args.resume_from_checkpoint_path is not None:
+            resume_from_checkpoint = args.resume_from_checkpoint_path
+            print(f"Resuming checkpoint {resume_from_checkpoint}")
+        else:
+            print("No checkpoint path provided, resuming from latest")
+
     print("Start training!")
-    trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     # Save the model
     trainer.save_model(args.output_model_name)
