@@ -577,7 +577,7 @@ def main():
         logging_strategy="steps",
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
-        report_to="all",
+        report_to="all" if args.run_name else "none",
         load_best_model_at_end=False,
         metric_for_best_model="wer",
         greater_is_better=False,
