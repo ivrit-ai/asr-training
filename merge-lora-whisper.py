@@ -6,6 +6,7 @@ import torch
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
 from peft import PeftModel, LoraConfig
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Merge LoRA weights with Whisper base model")
     parser.add_argument("--base_model_name", type=str, required=True, help="Name or path of the base Whisper model")
@@ -15,22 +16,18 @@ def parse_args():
     parser.add_argument("--hub_model_id", type=str, help="Model ID for pushing to Hugging Face Hub")
     return parser.parse_args()
 
+
 def main():
     args = parse_args()
 
     print(f"Loading base model: {args.base_model_name}")
     base_model = WhisperForConditionalGeneration.from_pretrained(
-        args.base_model_name,
-        device_map="auto",
-        torch_dtype=torch.float16
+        args.base_model_name, device_map="auto", torch_dtype=torch.float16
     )
 
     print(f"Loading LoRA adapter: {args.lora_model_name}")
     lora_model = PeftModel.from_pretrained(
-        base_model,
-        args.lora_model_name,
-        device_map="auto",
-        torch_dtype=torch.float16
+        base_model, args.lora_model_name, device_map="auto", torch_dtype=torch.float16
     )
 
     print("Merging weights")
@@ -46,12 +43,13 @@ def main():
     if args.push_to_hub:
         if not args.hub_model_id:
             raise ValueError("hub_model_id must be specified when push_to_hub is True")
-        
+
         print(f"Pushing merged model to Hugging Face Hub: {args.hub_model_id}")
         merged_model.push_to_hub(args.hub_model_id)
         processor.push_to_hub(args.hub_model_id)
 
     print("Done!")
+
 
 if __name__ == "__main__":
     main()
