@@ -1,3 +1,4 @@
+bitsandbytes
 datasets
 faster-whisper
 librosa

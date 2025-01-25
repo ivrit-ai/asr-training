@@ -12,9 +12,14 @@ venv
 # Data Folders
 data
 downloads
+local_models
+local_datasets
 
 # Temporary Scrips
 tmp_*.py
 
 # Local Configuration files
 config/
+
+# Local Tracker outputs
+wandb
