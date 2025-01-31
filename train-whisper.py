@@ -505,7 +505,9 @@ def main():
         raise ValueError("Cannot use preprocessed data and save preprocessed data at the same time.")
 
     processor = WhisperProcessor.from_pretrained(args.model_name, language="hebrew", task="transcribe")
-    preparator = DatasetPreparator(processor, proc_num=args.ds_processor_proc_num)
+    preparator = DatasetPreparator(
+        processor, proc_num=args.ds_processor_proc_num, timestamp_sample_prob=1, condition_on_prev_sample_prob=0.5
+    )
 
     if args.use_preprocessed:
         try:

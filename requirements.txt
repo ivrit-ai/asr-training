@@ -9,7 +9,7 @@ pydub
 soundfile
 torch
 torchaudio
-transformers
+transformers==4.48.1
 openai
 python-dotenv
 jiwer
