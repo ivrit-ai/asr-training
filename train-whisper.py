@@ -47,11 +47,6 @@ def parse_arguments():
         "--use_preprocessed", help="Dataset name to load preprocessed data from (either local path or remote dataset)"
     )
     parser.add_argument(
-        "--use_preprocessed_shuffle",
-        help="If to use a shuffled access of the preprocessed dataset",
-        action="store_true",
-    )
-    parser.add_argument(
         "--ds_processor_proc_num", type=int, default=1, help="Number of parallel processors for datasets preparation"
     )
     parser.add_argument("--model_name", default="openai/whisper-large-v2", help="Name of the model to train")
@@ -519,10 +514,6 @@ def main():
 
         train_set = dataset_dict["train"]
         eval_set = dataset_dict["eval"]
-        if args.use_preprocessed_shuffle:
-            print("Loading the preprocessed datasets shuffled")
-            train_set = train_set.shuffle()
-            eval_set = eval_set.shuffle()
     elif args.save_processed:
 
         if not args.train_datasets or not args.eval_dataset:
