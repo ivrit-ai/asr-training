@@ -2,37 +2,27 @@
 # coding: utf-8
 
 import argparse
+import re
+from dataclasses import dataclass
+from functools import partial
+from typing import Any, Dict, List, Union
+
 import evaluate
 import numpy as np
 import pandas as pd
-import re
 import torch
 import torchaudio
+from datasets import (Audio, Dataset, DatasetDict, Features, Sequence, Value,
+                      concatenate_datasets, load_dataset, load_from_disk)
+from peft import (LoraConfig, LoraModel, PeftModel, get_peft_model,
+                  prepare_model_for_kbit_training)
 from torchaudio.transforms import Resample
-
-from datasets import (
-    Audio,
-    load_dataset,
-    load_from_disk,
-    concatenate_datasets,
-    Dataset,
-    DatasetDict,
-    Features,
-    Sequence,
-    Value,
-)
-from functools import partial
-
-from transformers import WhisperProcessor, BatchFeature
+from transformers import (BatchFeature, BitsAndBytesConfig, Seq2SeqTrainer,
+                          Seq2SeqTrainingArguments,
+                          WhisperForConditionalGeneration, WhisperProcessor)
 from transformers.models.whisper.english_normalizer import BasicTextNormalizer
-from transformers import WhisperForConditionalGeneration, BitsAndBytesConfig
-from transformers import Seq2SeqTrainingArguments
-from transformers import Seq2SeqTrainer
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Union
-
-from peft import prepare_model_for_kbit_training, PeftModel, LoraModel, LoraConfig, get_peft_model
+from preprocess.augmentation import shift_audio_forward
 
 
 def parse_arguments():
@@ -43,6 +33,16 @@ def parse_arguments():
         help="Dataset(s) to train on. Format: dataset_name[:split_name]:text_column",
     )
     parser.add_argument("--save_processed", help="Dataset name to save processed data (will save both train and eval)")
+    parser.add_argument(
+        "--inject_preprocess_timestamps",
+        help="If a v1 dataset is used, inject synthetic timestamps",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--audio_shift_augmentation",
+        help="If a v1 dataset is used, and timestamps are inject, also randomize shift augmentation on it",
+        action="store_true",
+    )
     parser.add_argument(
         "--use_preprocessed", help="Dataset name to load preprocessed data from (either local path or remote dataset)"
     )
@@ -139,6 +139,8 @@ class DatasetPreparator:
         tokenizer_time_precision=0.02,
         timestamp_sample_prob=0.5,
         condition_on_prev_sample_prob=0.5,
+        inject_preprocess_timestamps=False,
+        audio_shift_augmentation=False,
         seed: np.random.RandomState = None,
         proc_num: int = 1,
         device: str = "cpu",
@@ -172,6 +174,9 @@ class DatasetPreparator:
         self.prev_ids_max_length = whisper_max_target_positions // 2
         self.timestamp_sample_prob = timestamp_sample_prob
         self.condition_on_prev_sample_prob = condition_on_prev_sample_prob
+        self.inject_preprocess_timestamps = inject_preprocess_timestamps
+        self.audio_shift_augmentation = audio_shift_augmentation
+        self.max_shifted_audio_ends_at = 29.6
 
         # Prepare the output features - to ensure optimal storage during mapping (uses disk cache for mapped content)
         self.output_features = Features(
@@ -197,13 +202,41 @@ class DatasetPreparator:
             lambda labels: len(labels) <= whisper_max_target_positions, input_columns="labels"
         )
 
+    def _assign_example_shift_amount(self, is_batched, example, result_example, format_version):
+        example_duration_batch = example["extra_data"]["duration"]
+        if not is_batched:
+            example_duration_batch = [example_duration_batch]
+
+        example_shifts = []
+        for duration in example_duration_batch:
+            if format_version == "v2" or not self.audio_shift_augmentation:
+                # v2 has built in timestamps and assumed to have proper slicing which does
+                # not require audio shift augmentation (yet)
+                example_shifts.append(0)
+
+            else:
+                max_shift = self.max_shifted_audio_ends_at - duration
+                shift = 0
+                if max_shift > 0:  # ony shift if there is room for it
+                    shift = round(
+                        self.seed.beta(2, 3) * max_shift, 2
+                    )  # Skew toward zero. rand to whisper audio timestamp precision
+                example_shifts.append(shift)
+
+        if not is_batched:
+            example_shifts = example_shifts[0]
+
+        result_example["audio_shift_augmentation"] = example_shifts
+
     def _prepare_example_audio(self, is_batched, example, result_example: BatchFeature) -> None:
         audio_batched = example["audio"]
+        example_shift_augmentation_batch = result_example["audio_shift_augmentation"]
         if not is_batched:
             audio_batched = [audio_batched]
+            example_shift_augmentation_batch = [example_shift_augmentation_batch]
 
         resampled_audio = []
-        for audio in audio_batched:
+        for audio, audio_shift_amount in zip(audio_batched, example_shift_augmentation_batch):
             original_sampling_rate = audio["sampling_rate"]
             target_sampling_rate = self.target_sampling_rate
 
@@ -213,6 +246,11 @@ class DatasetPreparator:
                 resampled_audio_array = resampler(audio_array).numpy()
             else:
                 resampled_audio_array = audio["array"]
+
+            if audio_shift_amount > 0:
+                resampled_audio_array = shift_audio_forward(
+                    resampled_audio_array, audio_shift_amount, target_sampling_rate
+                )
 
             resampled_audio.append(resampled_audio_array)
 
@@ -259,12 +297,12 @@ class DatasetPreparator:
         result_example["input_length"] = input_lengths
 
     def _prepare_example_text(self, is_batched, example, result_example, text_column_name, format_version) -> None:
-        # Currently v2 format contains timestampped data and the prev transcript to condition on
+        # Currently v2 format contains timestamped data and the prev transcript to condition on
         is_v2_format = format_version == "v2"
         can_add_timestamps = False
         prev_text_column_name = None
         tokenizer_kwargs = dict(
-            add_special_tokens=True,
+            add_special_tokens=False,  # We will take care of prefixes/suffixes manually
             # Motivation: sometimes post-training models glue words together.
             add_prefix_space=True,
             return_attention_mask=False,
@@ -272,7 +310,6 @@ class DatasetPreparator:
         if is_v2_format:
             text_column_name = "transcript"
             prev_text_column_name = "prev_transcript"
-            tokenizer_kwargs["add_special_tokens"] = False
             tokenizer_kwargs["add_prefix_space"] = False  # v2 preformatted the text
 
         text = example[text_column_name]  # Text may contain timestamps
@@ -282,15 +319,18 @@ class DatasetPreparator:
             **tokenizer_kwargs,
         )
 
+        result_example_labels = []
+        token_ids_batch = tokenizer_result["input_ids"]
+
+        if not is_batched:
+            token_ids_batch = [token_ids_batch]
+
         if is_v2_format:
             can_add_timestamps = True  # For now assume v2 format always has timestamps
-            result_example_labels = []
-            token_ids_batch = tokenizer_result["input_ids"]
             prev_text_batch = example[prev_text_column_name]
             has_prev_batch = example["has_prev"]
 
             if not is_batched:
-                token_ids_batch = [token_ids_batch]
                 prev_text_batch = [prev_text_batch]
                 has_prev_batch = [has_prev_batch]
 
@@ -337,12 +377,35 @@ class DatasetPreparator:
 
                 result_example_labels.append(all_input_ids)
 
-            if not is_batched:
-                result_example_labels = result_example_labels[0]
+        else:  # V1 - no timestamps tokens present in the text
+            example_duration_batch = example["extra_data"]["duration"]
+            example_shift_augmentation_batch = result_example["audio_shift_augmentation"]
 
-            result_example["labels"] = result_example_labels
-        else:
-            result_example["labels"] = tokenizer_result["input_ids"]
+            if not is_batched:
+                example_duration_batch = [example_duration_batch]
+                example_shift_augmentation_batch = [example_shift_augmentation_batch]
+
+            for token_ids, duration, shift_augmentation in zip(
+                token_ids_batch, example_duration_batch, example_shift_augmentation_batch
+            ):
+                if self.inject_preprocess_timestamps:
+                    start_at_ts_id = self._get_token_timestamp_for_time(shift_augmentation)
+                    ends_at = shift_augmentation + duration
+                    ends_at_ts_id = self._get_token_timestamp_for_time(ends_at)
+                    # wrap the text segment with the synthetic injected timestamp tokens
+                    # and append prefix/suffix for timestamp decoding
+                    all_input_ids = (
+                        self.prefix_tokens_with_ts + [start_at_ts_id] + token_ids + [ends_at_ts_id, self.eot_token_id]
+                    )
+                else:
+                    all_input_ids = self.prefix_tokens_no_ts + token_ids + [self.eot_token_id]
+
+                result_example_labels.append(all_input_ids)
+
+        if not is_batched:
+            result_example_labels = result_example_labels[0]
+
+        result_example["labels"] = result_example_labels
 
     def _prepare_example_fn(self, example, text_column_name, format_version):
         is_batched = isinstance(example["audio"], (list, tuple))
@@ -352,6 +415,7 @@ class DatasetPreparator:
             # This is a very weird API quirk, but it's what the processor produces so we need to adapt.
             result_example = BatchFeature({})
 
+            self._assign_example_shift_amount(is_batched, example, result_example, format_version)
             self._prepare_example_audio(is_batched, example, result_example)
             self._prepare_example_text(is_batched, example, result_example, text_column_name, format_version)
 
@@ -501,7 +565,12 @@ def main():
 
     processor = WhisperProcessor.from_pretrained(args.model_name, language="hebrew", task="transcribe")
     preparator = DatasetPreparator(
-        processor, proc_num=args.ds_processor_proc_num, timestamp_sample_prob=1, condition_on_prev_sample_prob=0.5
+        processor,
+        proc_num=args.ds_processor_proc_num,
+        timestamp_sample_prob=1,
+        condition_on_prev_sample_prob=0.5,
+        inject_preprocess_timestamps=args.inject_preprocess_timestamps,
+        audio_shift_augmentation=args.audio_shift_augmentation,
     )
 
     if args.use_preprocessed:
