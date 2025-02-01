@@ -419,6 +419,9 @@ class DatasetPreparator:
             self._prepare_example_audio(is_batched, example, result_example)
             self._prepare_example_text(is_batched, example, result_example, text_column_name, format_version)
 
+            # Cleanup - this feature is not part of the output ds structure
+            result_example.pop("audio_shift_augmentation")
+
             return result_example
         except Exception as e:
             print(f"Exception: {e}")
