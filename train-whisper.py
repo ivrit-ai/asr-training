@@ -203,25 +203,29 @@ class DatasetPreparator:
         )
 
     def _assign_example_shift_amount(self, is_batched, example, result_example, format_version):
-        example_duration_batch = example["extra_data"]["duration"]
-        if not is_batched:
-            example_duration_batch = [example_duration_batch]
+        if format_version == "v2":
+            # v2 has built in timestamps and assumed to have proper slicing which does
+            # not require audio shift augmentation (yet)
+            batch_length = len(example["audio"]) if is_batched else 1
+            example_shifts = [0] * batch_length
+        else:
+            example_duration_batch = example["extra_data"]["duration"]
+            if not is_batched:
+                example_duration_batch = [example_duration_batch]
 
-        example_shifts = []
-        for duration in example_duration_batch:
-            if format_version == "v2" or not self.audio_shift_augmentation:
-                # v2 has built in timestamps and assumed to have proper slicing which does
-                # not require audio shift augmentation (yet)
-                example_shifts.append(0)
+            example_shifts = []
+            for duration in example_duration_batch:
+                if not self.audio_shift_augmentation:
+                    example_shifts.append(0)
 
-            else:
-                max_shift = self.max_shifted_audio_ends_at - duration
-                shift = 0
-                if max_shift > 0:  # ony shift if there is room for it
-                    shift = round(
-                        self.seed.beta(2, 3) * max_shift, 2
-                    )  # Skew toward zero. rand to whisper audio timestamp precision
-                example_shifts.append(shift)
+                else:
+                    max_shift = self.max_shifted_audio_ends_at - duration
+                    shift = 0
+                    if max_shift > 0:  # ony shift if there is room for it
+                        shift = round(
+                            self.seed.beta(2, 3) * max_shift, 2
+                        )  # Skew toward zero. rand to whisper audio timestamp precision
+                    example_shifts.append(shift)
 
         if not is_batched:
             example_shifts = example_shifts[0]
