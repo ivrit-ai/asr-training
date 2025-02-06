@@ -93,6 +93,7 @@ def parse_arguments():
         "--max_steps", type=int, default=-1, help="How many steps to train for - overrides num_train_epochs"
     )
     parser.add_argument("--warmup_steps", type=int, default=500, help="Number of warmup steps")
+    parser.add_argument("--lr_scheduler_type", type=str, default="constant_with_warmup", help="Learning rate scheduler type")
     parser.add_argument(
         "--gradient_accumulation_steps", type=int, default=2, help="Number of gradient accumulation steps"
     )
@@ -716,7 +717,7 @@ def main():
         per_device_train_batch_size=args.per_device_train_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
-        lr_scheduler_type="constant_with_warmup",
+        lr_scheduler_type=args.lr_scheduler_type,
         warmup_ratio=args.warmup_ratio,  # Overidden by warmup_steps - So cannot really use this?
         warmup_steps=args.warmup_steps,
         eval_strategy="steps",
