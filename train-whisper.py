@@ -11,15 +11,28 @@ import evaluate
 import numpy as np
 import pandas as pd
 import torch
-import torchaudio
-from datasets import (Audio, Dataset, DatasetDict, Features, Sequence, Value,
-                      concatenate_datasets, load_dataset, load_from_disk)
-from peft import (LoraConfig, LoraModel, PeftModel, get_peft_model,
-                  prepare_model_for_kbit_training)
+from datasets import (
+    Audio,
+    Dataset,
+    DatasetDict,
+    Features,
+    Sequence,
+    Value,
+    concatenate_datasets,
+    load_dataset,
+    load_from_disk,
+    interleave_datasets,
+)
+from peft import LoraConfig, LoraModel, PeftModel, get_peft_model, prepare_model_for_kbit_training
 from torchaudio.transforms import Resample
-from transformers import (BatchFeature, BitsAndBytesConfig, Seq2SeqTrainer,
-                          Seq2SeqTrainingArguments,
-                          WhisperForConditionalGeneration, WhisperProcessor)
+from transformers import (
+    BatchFeature,
+    BitsAndBytesConfig,
+    Seq2SeqTrainer,
+    Seq2SeqTrainingArguments,
+    WhisperForConditionalGeneration,
+    WhisperProcessor,
+)
 from transformers.modeling_outputs import Seq2SeqLMOutput
 from transformers.models.whisper.english_normalizer import BasicTextNormalizer
 
@@ -45,7 +58,12 @@ def parse_arguments():
         action="store_true",
     )
     parser.add_argument(
-        "--use_preprocessed", help="Dataset name to load preprocessed data from (either local path or remote dataset)"
+        "--use_preprocessed",
+        nargs="+",
+        help="Dataset name to load preprocessed data from (either local path or remote dataset)",
+    )
+    parser.add_argument(
+        "--use_preprocessed_probs", nargs="+", type=float, help="Probability of using preprocessed data"
     )
     parser.add_argument(
         "--ds_processor_proc_num", type=int, default=1, help="Number of parallel processors for datasets preparation"
@@ -565,6 +583,7 @@ def prepare_model_for_qlora(model):
 
     return model
 
+
 def compute_loss_func(
     outputs: Seq2SeqLMOutput,
     labels: torch.Tensor,
@@ -584,8 +603,9 @@ def compute_loss_func(
     loss = loss_fct(lm_logits.view(-1, vocab_size), labels.reshape(-1))
     if reduction == "sum":
         loss = loss / num_items_in_batch
-    
+
     return loss
+
 
 def main():
     args = parse_arguments()
@@ -607,15 +627,35 @@ def main():
     )
 
     if args.use_preprocessed:
-        try:
-            # Try to load from disk first
-            dataset_dict = load_from_disk(args.use_preprocessed)
-        except FileNotFoundError:
-            # If not found on disk, try to load as a remote dataset
-            dataset_dict = load_dataset(args.use_preprocessed)
+        preprocessed_dataset_dicts = []
+        for preprocessed in args.use_preprocessed:
+            try:
+                # Try to load from disk first
+                dataset_dict = load_from_disk(preprocessed)
+            except FileNotFoundError:
+                # If not found on disk, try to load as a remote dataset
+                dataset_dict = load_dataset(preprocessed)
+            preprocessed_dataset_dicts.append(dataset_dict)
 
-        train_set = dataset_dict["train"]
-        eval_set = dataset_dict["eval"]
+        if len(preprocessed_dataset_dicts) == 1:
+            train_set = dataset_dict["train"]
+            eval_set = dataset_dict["eval"]
+        else:
+            probs = None
+            if args.use_preprocessed_probs is not None:
+                assert len(args.use_preprocessed_probs) == len(preprocessed_dataset_dicts)
+                probs = args.use_preprocessed_probs
+            train_set = interleave_datasets(
+                [d["train"] for d in preprocessed_dataset_dicts],
+                probabilities=probs,
+                stopping_strategy="all_exhausted",
+            )
+            eval_set = interleave_datasets(
+                [d["eval"] for d in preprocessed_dataset_dicts],
+                probabilities=probs,
+                stopping_strategy="all_exhausted",
+            )
+
     elif args.save_processed:
 
         if not args.train_datasets or not args.eval_dataset:
