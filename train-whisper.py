@@ -20,6 +20,7 @@ from torchaudio.transforms import Resample
 from transformers import (BatchFeature, BitsAndBytesConfig, Seq2SeqTrainer,
                           Seq2SeqTrainingArguments,
                           WhisperForConditionalGeneration, WhisperProcessor)
+from transformers.modeling_outputs import Seq2SeqLMOutput
 from transformers.models.whisper.english_normalizer import BasicTextNormalizer
 
 from preprocess.augmentation import shift_audio_forward
@@ -497,10 +498,14 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         # Shift all labels to the left, thus the expected generated label
         # is at the same index of the generated output id from the decoder
         # and the loss function would compare them (cross entropy loss in this case)
-        # Note - this means the is no loss calculated ot the first "start of transcript" token id
+        # Note - this means there is no loss calculated for the first "start of transcript" token id
         # since it is not expected to be predicted but always provided.
         # The loss is calculated for the task/lang/notimestamp tokens since the model needs to know
         # to associate them with the proper output
+        # **Warning!** the labels are shifted here, and some version of transformers will assume
+        # they are not if using the default "ForCausalLMLoss"
+        # Once Whisper is updated to use that built-in loss - need to reconsider the collator.
+        # Atm the custom loss function expects this shift to be done here.
         labels = labels[:, 1:]
         labels_mask = labels_batch.attention_mask[:, 1:]
 
@@ -560,6 +565,27 @@ def prepare_model_for_qlora(model):
 
     return model
 
+def compute_loss_func(
+    outputs: Seq2SeqLMOutput,
+    labels: torch.Tensor,
+    num_items_in_batch: int,
+):
+    # Until the Whisper model loss is updated to use the new Transfomers loss infrastruture,
+    # it suffers from  bug in how grad acc steps loss is calculated. This is a workaround.
+    # See https://huggingface.co/blog/gradient_accumulation
+
+    lm_logits = outputs.logits
+    vocab_size = lm_logits.shape[2]
+    reduction = "sum" if num_items_in_batch is not None else "mean"
+    loss_fct = torch.nn.CrossEntropyLoss(reduction=reduction)
+    # move labels to correct device to enable PP
+    labels = labels.to(lm_logits.device)
+
+    loss = loss_fct(lm_logits.view(-1, vocab_size), labels.reshape(-1))
+    if reduction == "sum":
+        loss = loss / num_items_in_batch
+    
+    return loss
 
 def main():
     args = parse_arguments()
@@ -683,6 +709,7 @@ def main():
         data_collator=data_collator,
         compute_metrics=lambda pred: compute_metrics(pred, processor, metric, normalizer),
         processing_class=processor,
+        compute_loss_func=compute_loss_func,
     )
 
     resume_from_checkpoint = False
