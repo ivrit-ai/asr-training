@@ -7,6 +7,25 @@ import jiwer
 import pandas
 from hebrew import Hebrew
 import whisper.normalizers
+import dotenv
+
+dotenv.load_dotenv()
+
+
+def parse_model_args(model_string: str) -> dict:
+    """Parse model string into a dictionary of arguments.
+    Format: base_model;arg1=value1;arg2=value2
+    Example: "large-v3;base_engine=engines/faster_whisper_engine.py;llm_model=claude-3-opus-20240229"
+    """
+    parts = model_string.split(";")
+    args = {"model_path": parts[0]}
+
+    for part in parts[1:]:
+        if "=" in part:
+            key, value = part.split("=", 1)
+            args[key.strip()] = value.strip()
+
+    return args
 
 
 def clean_some_unicode_from_text(text):
@@ -98,7 +117,9 @@ def evaluate_model(transcribe_fn, ds, text_column, num_workers=1):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate a speech-to-text model.")
     parser.add_argument("--engine", type=str, required=True, help="Path to engine script")
-    parser.add_argument("--model", type=str, required=True, help="Model to use")
+    parser.add_argument(
+        "--engine-args", type=str, required=True, help="Engine arguments in format: arg1=value1,arg2=value2"
+    )
     parser.add_argument(
         "--dataset", type=str, required=True, help="Dataset to evaluate in format dataset_name:<split>:<text_column>"
     )
@@ -108,6 +129,14 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # Parse engine arguments
+    engine_args = {}
+    if args.engine_args:
+        for arg_pair in args.engine_args.split(","):
+            if "=" in arg_pair:
+                key, value = arg_pair.split("=", 1)
+                engine_args[key.strip()] = value.strip()
+
     # Import the engine module
     import importlib.util
 
@@ -115,8 +144,8 @@ if __name__ == "__main__":
     engine = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(engine)
 
-    print(f"Loading engine {args.engine} with model {args.model}...")
-    transcribe_fn = engine.create_app(model_path=args.model)
+    print(f"Loading engine {args.engine} with arguments: {engine_args}")
+    transcribe_fn = engine.create_app(**engine_args)
 
     print(f"Loading dataset {args.dataset}...")
     dataset_parts = args.dataset.split(":")
@@ -135,10 +164,9 @@ if __name__ == "__main__":
     print(f"Evaluation done. WER={metrics.wer}, WIL={metrics.wil}.")
 
     # Add model and dataset info as columns
-    results_df["model"] = args.model
+    results_df["model"] = args.engine
     results_df["dataset"] = dataset_name
     results_df["dataset_split"] = dataset_split
-    results_df["engine"] = args.engine
 
     results_df.to_csv(args.output, encoding="utf-8", index=False)
     print(f"Results saved to {args.output}")

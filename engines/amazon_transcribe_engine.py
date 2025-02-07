@@ -58,7 +58,7 @@ async def process_stream_audio(audio_bytes):
 
 
 def create_app(**kwargs) -> Callable:
-    model_type = kwargs.get("model_path")  # 'batch' or 'stream'
+    model_type = kwargs.get("model")  # Changed from model_path
     transcribe_client = boto3.client("transcribe")
 
     if model_type == "batch":

@@ -10,10 +10,12 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("--engine", required=True, help="Path to engine script (e.g. engines/faster_whisper_engine.py)")
-    parser.add_argument("--model", required=True, help="Model to use")
     parser.add_argument("--output-dir", required=True, help="Directory to store evaluation results")
     parser.add_argument("--workers", type=int, default=8, help="Number of parallel workers")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output files")
+    parser.add_argument(
+        "--engine-args", type=str, required=True, help="Engine arguments in format: arg1=value1,arg2=value2"
+    )
     args = parser.parse_args()
 
     # Ensure engine script exists
@@ -47,8 +49,8 @@ def main():
             "./evaluate_model.py",
             "--engine",
             str(engine_path.absolute()),
-            "--model",
-            args.model,
+            "--engine-args",
+            args.engine_args,
             "--dataset",
             ds_path,
             "--workers",

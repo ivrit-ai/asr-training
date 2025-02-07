@@ -11,6 +11,7 @@ def create_app(**kwargs) -> Callable:
     speech_client = speech.SpeechClient()
     storage_client = storage.Client()
     bucket_name = "stt-evaluation-audio-bucket"
+    model = kwargs.get("model")
 
     # Ensure bucket exists
     try:
@@ -40,7 +41,7 @@ def create_app(**kwargs) -> Callable:
             encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
             sample_rate_hertz=16000,
             language_code="he-IL",
-            model="default",
+            model=model,
         )
 
         operation = speech_client.long_running_recognize(config=config, audio=audio)
