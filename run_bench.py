@@ -3,17 +3,23 @@
 import argparse
 import os
 import subprocess
+from pathlib import Path
 
 
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser()
-    parser.add_argument("--engine", required=True)
-    parser.add_argument("--model", required=True)
-    parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--engine", required=True, help="Path to engine script (e.g. engines/faster_whisper_engine.py)")
+    parser.add_argument("--model", required=True, help="Model to use")
+    parser.add_argument("--output-dir", required=True, help="Directory to store evaluation results")
+    parser.add_argument("--workers", type=int, default=8, help="Number of parallel workers")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output files")
     args = parser.parse_args()
+
+    # Ensure engine script exists
+    engine_path = Path(args.engine)
+    if not engine_path.exists():
+        raise FileNotFoundError(f"Engine script not found: {args.engine}")
 
     # Create output directory if it doesn't exist
     os.makedirs(args.output_dir, exist_ok=True)
@@ -40,7 +46,7 @@ def main():
         cmd = [
             "./evaluate_model.py",
             "--engine",
-            args.engine,
+            str(engine_path.absolute()),
             "--model",
             args.model,
             "--dataset",
@@ -54,7 +60,11 @@ def main():
         if ds_name:
             cmd.extend(["--name", ds_name])
 
-        subprocess.run(cmd, check=True)
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as e:
+            print(f"Error evaluating {ds_path}: {e}")
+            continue
 
 
 if __name__ == "__main__":

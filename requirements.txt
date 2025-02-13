@@ -24,3 +24,6 @@ accelerate
 boto3
 google-cloud-speech
 google-cloud-storage
+amazon-transcribe
+hebrew
+runpod
