@@ -38,81 +38,6 @@ from transformers.models.whisper.english_normalizer import BasicTextNormalizer
 
 from preprocess.augmentation import shift_audio_forward
 
-
-def parse_arguments():
-    parser = argparse.ArgumentParser(description="Train a Whisper model with custom datasets.")
-    parser.add_argument(
-        "--train_datasets",
-        nargs="*",
-        help="Dataset(s) to train on. Format: dataset_name[:split_name]:text_column",
-    )
-    parser.add_argument("--save_processed", help="Dataset name to save processed data (will save both train and eval)")
-    parser.add_argument(
-        "--inject_preprocess_timestamps",
-        help="If a v1 dataset is used, inject synthetic timestamps",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--audio_shift_augmentation",
-        help="If a v1 dataset is used, and timestamps are inject, also randomize shift augmentation on it",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--use_preprocessed",
-        nargs="+",
-        help="Dataset name to load preprocessed data from (either local path or remote dataset)",
-    )
-    parser.add_argument(
-        "--use_preprocessed_probs", nargs="+", type=float, help="Probability of using preprocessed data"
-    )
-    parser.add_argument(
-        "--ds_processor_proc_num", type=int, default=1, help="Number of parallel processors for datasets preparation"
-    )
-    parser.add_argument("--model_name", default="openai/whisper-large-v2", help="Name of the model to train")
-    parser.add_argument("--output_model_name", required=True, help="Name of the fine-tuned model to generate")
-    parser.add_argument("--hf_org_name", default="ivrit-ai", help="Name of HF Org to push the model to")
-    parser.add_argument("--skip_push_to_hub", action="store_true", help="Don't push result model to hub")
-    parser.add_argument(
-        "--eval_dataset",
-        help="Reference dataset for evaluation. Format: dataset_name[:split_name]:text_column",
-    )
-    parser.add_argument(
-        "--resume_from_checkpoint", action="store_true", help="Try and resuming for last saved checkpoint"
-    )
-    parser.add_argument(
-        "--resume_from_checkpoint_path", type=str, help="Path to checkpoint to resume from", default=None
-    )
-    parser.add_argument(
-        "--ignore_data_skip", action="store_true", help="Ignore data skip when resuming from checkpoint"
-    )
-    parser.add_argument("--use_qlora", action="store_true", help="Use QLoRA for training")
-    parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate")
-    parser.add_argument("--warmup_ratio", type=float, default=0.1, help="Warmup ratio")
-    parser.add_argument("--num_train_epochs", type=int, default=10, help="Number of training epochs")
-    parser.add_argument(
-        "--max_steps", type=int, default=-1, help="How many steps to train for - overrides num_train_epochs"
-    )
-    parser.add_argument("--warmup_steps", type=int, default=500, help="Number of warmup steps")
-    parser.add_argument("--lr_scheduler_type", type=str, default="constant_with_warmup", help="Learning rate scheduler type")
-    parser.add_argument(
-        "--gradient_accumulation_steps", type=int, default=2, help="Number of gradient accumulation steps"
-    )
-    parser.add_argument("--weight_decay", type=float, default=0.05, help="Weight decay")
-    parser.add_argument(
-        "--eval_steps", type=int, help="Number of steps between two evals, if not specified defaults to logging_steps."
-    )
-    parser.add_argument("--save_steps", type=int, default=500, help="Number of steps between each model save/upload.")
-    parser.add_argument("--max_eval_set_size", type=int, help="Maximum number of entries to fetch from eval dataset.")
-
-    parser.add_argument("--per_device_train_batch_size", type=int, default=16, help="Per-device train batch size.")
-    parser.add_argument("--per_device_eval_batch_size", type=int, default=16, help="Per-device eval batch size.")
-
-    parser.add_argument("--run_name", help="Run name to report to the run tracker")
-    parser.add_argument("--logging_steps", type=int, default=500, help="Number of step between each log")
-
-    return parser.parse_args()
-
-
 # Split on : but allow : inside [] for the HF split slicing syntax
 # https://huggingface.co/docs/datasets/loading#slice-splits
 dataset_spec_split_pattern = r":(?=(?:[^\[\]]|\[[^\[\]]*\])*$)"
@@ -157,13 +82,16 @@ class DatasetPreparator:
         processor: WhisperProcessor,
         # Don't change this for Whisper
         tokenizer_time_precision=0.02,
+        # Below can be adapted
         timestamp_sample_prob=0.5,
         condition_on_prev_sample_prob=0.5,
+        proc_num: int = 1,
+        # Multi worker only supports cpu atm (crashes on cuda)
+        device: str = "cpu",
+        seed: np.random.RandomState = None,
+        # Experimental
         inject_preprocess_timestamps=False,
         audio_shift_augmentation=False,
-        seed: np.random.RandomState = None,
-        proc_num: int = 1,
-        device: str = "cpu",
     ):
         if proc_num > 1:  # Parallel processing will not work in multi threaded env.
             torch.set_num_threads(1)
@@ -251,6 +179,10 @@ class DatasetPreparator:
             example_shifts = example_shifts[0]
 
         result_example["audio_shift_augmentation"] = example_shifts
+
+    def _clear_example_shift_amount(self, result_example):
+        if "audio_shift_augmentation" in result_example:
+            result_example.pop("audio_shift_augmentation")
 
     def _prepare_example_audio(self, is_batched, example, result_example: BatchFeature) -> None:
         audio_batched = example["audio"]
@@ -442,9 +374,7 @@ class DatasetPreparator:
             self._assign_example_shift_amount(is_batched, example, result_example, format_version)
             self._prepare_example_audio(is_batched, example, result_example)
             self._prepare_example_text(is_batched, example, result_example, text_column_name, format_version)
-
-            # Cleanup - this feature is not part of the output ds structure
-            result_example.pop("audio_shift_augmentation")
+            self._clear_example_shift_amount(result_example)
 
             return result_example
         except Exception as e:
@@ -606,6 +536,82 @@ def compute_loss_func(
         loss = loss / num_items_in_batch
 
     return loss
+
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Train a Whisper model with custom datasets.")
+    parser.add_argument(
+        "--train_datasets",
+        nargs="*",
+        help="Dataset(s) to train on. Format: dataset_name[:split_name]:text_column",
+    )
+    parser.add_argument("--save_processed", help="Dataset name to save processed data (will save both train and eval)")
+    parser.add_argument(
+        "--inject_preprocess_timestamps",
+        help="If a v1 dataset is used, inject synthetic timestamps",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--audio_shift_augmentation",
+        help="If a v1 dataset is used, and timestamps are inject, also randomize shift augmentation on it",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--use_preprocessed",
+        nargs="+",
+        help="Dataset name to load preprocessed data from (either local path or remote dataset)",
+    )
+    parser.add_argument(
+        "--use_preprocessed_probs", nargs="+", type=float, help="Probability of using preprocessed data"
+    )
+    parser.add_argument(
+        "--ds_processor_proc_num", type=int, default=1, help="Number of parallel processors for datasets preparation"
+    )
+    parser.add_argument("--model_name", default="openai/whisper-large-v2", help="Name of the model to train")
+    parser.add_argument("--output_model_name", required=True, help="Name of the fine-tuned model to generate")
+    parser.add_argument("--hf_org_name", default="ivrit-ai", help="Name of HF Org to push the model to")
+    parser.add_argument("--skip_push_to_hub", action="store_true", help="Don't push result model to hub")
+    parser.add_argument(
+        "--eval_dataset",
+        help="Reference dataset for evaluation. Format: dataset_name[:split_name]:text_column",
+    )
+    parser.add_argument(
+        "--resume_from_checkpoint", action="store_true", help="Try and resuming for last saved checkpoint"
+    )
+    parser.add_argument(
+        "--resume_from_checkpoint_path", type=str, help="Path to checkpoint to resume from", default=None
+    )
+    parser.add_argument(
+        "--ignore_data_skip", action="store_true", help="Ignore data skip when resuming from checkpoint"
+    )
+    parser.add_argument("--use_qlora", action="store_true", help="Use QLoRA for training")
+    parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate")
+    parser.add_argument("--warmup_ratio", type=float, default=0.1, help="Warmup ratio")
+    parser.add_argument("--num_train_epochs", type=int, default=10, help="Number of training epochs")
+    parser.add_argument(
+        "--max_steps", type=int, default=-1, help="How many steps to train for - overrides num_train_epochs"
+    )
+    parser.add_argument("--warmup_steps", type=int, default=500, help="Number of warmup steps")
+    parser.add_argument(
+        "--lr_scheduler_type", type=str, default="constant_with_warmup", help="Learning rate scheduler type"
+    )
+    parser.add_argument(
+        "--gradient_accumulation_steps", type=int, default=2, help="Number of gradient accumulation steps"
+    )
+    parser.add_argument("--weight_decay", type=float, default=0.05, help="Weight decay")
+    parser.add_argument(
+        "--eval_steps", type=int, help="Number of steps between two evals, if not specified defaults to logging_steps."
+    )
+    parser.add_argument("--save_steps", type=int, default=500, help="Number of steps between each model save/upload.")
+    parser.add_argument("--max_eval_set_size", type=int, help="Maximum number of entries to fetch from eval dataset.")
+
+    parser.add_argument("--per_device_train_batch_size", type=int, default=16, help="Per-device train batch size.")
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=16, help="Per-device eval batch size.")
+
+    parser.add_argument("--run_name", help="Run name to report to the run tracker")
+    parser.add_argument("--logging_steps", type=int, default=500, help="Number of step between each log")
+
+    return parser.parse_args()
 
 
 def main():
