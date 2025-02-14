@@ -77,6 +77,25 @@ whisper_max_target_positions = 448
 
 
 class DatasetPreparator:
+    """
+    This class is responsible for preparing the dataset for training.
+    It will:
+    - Resample the audio to the target sampling rate if needed
+    - Extract audio features from the audio
+    - If audio was padded, store the padding in a less wasteful format
+    - If requested, augment the audio with a random shift forward
+    - Randomly decide whether to include timestamps with a sample
+    - Randomly decide whether to include previous text with a sample
+    - If timestamps are not included, inject a start-end timestamp token pair according to duration and shift augmentation, if injection was enabled
+    - If timestamps are included, remove them in case decision was to not train on them for that sample
+    - Tokenize the prev_text and text prefixing with the proper Whisper prefix tokens
+    - Return the prepared example as a BatchFeature object dropping original dataset columns
+    - If the features "has_timestamps" and "has_prev" are not present, assume no timestamps and no previous text
+
+    Notes:
+    - This process runs nicely in parallel (use proc_num > 1) but not when the device is set to GPU
+    """
+
     def __init__(
         self,
         processor: WhisperProcessor,
@@ -90,7 +109,7 @@ class DatasetPreparator:
         device: str = "cpu",
         seed: np.random.RandomState = None,
         # Experimental
-        inject_preprocess_timestamps=False,
+        inject_synthetic_timestamps=False,
         audio_shift_augmentation=False,
     ):
         if proc_num > 1:  # Parallel processing will not work in multi threaded env.
@@ -122,7 +141,7 @@ class DatasetPreparator:
         self.prev_ids_max_length = whisper_max_target_positions // 2
         self.timestamp_sample_prob = timestamp_sample_prob
         self.condition_on_prev_sample_prob = condition_on_prev_sample_prob
-        self.inject_preprocess_timestamps = inject_preprocess_timestamps
+        self.inject_synthetic_timestamps = inject_synthetic_timestamps
         self.audio_shift_augmentation = audio_shift_augmentation
         self.max_shifted_audio_ends_at = 29.6
 
@@ -137,6 +156,23 @@ class DatasetPreparator:
             }
         )
 
+    def _validate_dataset_features(self, dataset):
+        if "audio" not in dataset.features:
+            raise ValueError("Dataset must contain an 'audio' feature")
+        elif not isinstance(dataset.features["audio"], Audio):
+            raise ValueError("Dataset must contain an 'audio' feature of type Audio")
+
+        if "transcript" not in dataset.features:
+            raise ValueError("Dataset must contain a 'transcript' feature")
+
+        if not "has_timestamps" in dataset.features:
+            print("Dataset does not contain a 'has_timestamps' feature. Assuming no timestamps.")
+
+        if not "has_prev" in dataset.features:
+            print("Dataset does not contain a 'has_prev' feature. Assuming no previous transcript.")
+        elif not "prev_transcript" in dataset.features:
+            raise ValueError("Dataset must contain a 'prev_transcript' feature if 'has_prev' is True")
+
     def _get_token_timestamp_for_time(self, time: float) -> int:
         # Sanity - time cannot be more than max timestamp token.
         if self.max_allowed_tokenized_timestamp < time:
@@ -150,242 +186,181 @@ class DatasetPreparator:
             lambda labels: len(labels) <= whisper_max_target_positions, input_columns="labels"
         )
 
-    def _assign_example_shift_amount(self, is_batched, example, result_example, format_version):
-        if format_version == "v2":
-            # v2 has built in timestamps and assumed to have proper slicing which does
-            # not require audio shift augmentation (yet)
-            batch_length = len(example["audio"]) if is_batched else 1
-            example_shifts = [0] * batch_length
+    def _decide_example_augmentation(self, example, ancillary_features):
+        """
+        Decide whether to augment the audio with a shift (0 if no augmentation)
+        """
+        example_shift = 0
+        audio = example["audio"]
+        audio_duration = audio["array"].shape[0] / audio["sampling_rate"]
+        if self.audio_shift_augmentation:
+            max_shift = self.max_shifted_audio_ends_at - audio_duration
+
+            if max_shift > 0:  # ony shift if there is room for it
+                example_shift = round(
+                    self.seed.beta(2, 3) * max_shift, 2
+                )  # Skew toward zero. rand to whisper audio timestamp precision
+
+        ancillary_features["audio_shift_augmentation"] = example_shift
+        ancillary_features["original_audio_duration"] = audio_duration
+
+    def _prepare_example_audio(self, example, ancillary_features, result_example: BatchFeature) -> None:
+        audio = example["audio"]
+        example_audio_shift_augmentation = ancillary_features["audio_shift_augmentation"]
+        original_sampling_rate = audio["sampling_rate"]
+        target_sampling_rate = self.target_sampling_rate
+
+        if original_sampling_rate != target_sampling_rate:
+            resampler = Resample(orig_freq=original_sampling_rate, new_freq=target_sampling_rate)
+            audio_array = torch.tensor(audio["array"]).float()
+            resampled_audio_array = resampler(audio_array).numpy()
         else:
-            example_duration_batch = example["extra_data"]["duration"]
-            if not is_batched:
-                example_duration_batch = [example_duration_batch]
+            resampled_audio_array = audio["array"]
 
-            example_shifts = []
-            for duration in example_duration_batch:
-                if not self.audio_shift_augmentation:
-                    example_shifts.append(0)
-
-                else:
-                    max_shift = self.max_shifted_audio_ends_at - duration
-                    shift = 0
-                    if max_shift > 0:  # ony shift if there is room for it
-                        shift = round(
-                            self.seed.beta(2, 3) * max_shift, 2
-                        )  # Skew toward zero. rand to whisper audio timestamp precision
-                    example_shifts.append(shift)
-
-        if not is_batched:
-            example_shifts = example_shifts[0]
-
-        result_example["audio_shift_augmentation"] = example_shifts
-
-    def _clear_example_shift_amount(self, result_example):
-        if "audio_shift_augmentation" in result_example:
-            result_example.pop("audio_shift_augmentation")
-
-    def _prepare_example_audio(self, is_batched, example, result_example: BatchFeature) -> None:
-        audio_batched = example["audio"]
-        example_shift_augmentation_batch = result_example["audio_shift_augmentation"]
-        if not is_batched:
-            audio_batched = [audio_batched]
-            example_shift_augmentation_batch = [example_shift_augmentation_batch]
-
-        resampled_audio = []
-        for audio, audio_shift_amount in zip(audio_batched, example_shift_augmentation_batch):
-            original_sampling_rate = audio["sampling_rate"]
-            target_sampling_rate = self.target_sampling_rate
-
-            if original_sampling_rate != target_sampling_rate:
-                resampler = Resample(orig_freq=original_sampling_rate, new_freq=target_sampling_rate)
-                audio_array = torch.tensor(audio["array"]).float()
-                resampled_audio_array = resampler(audio_array).numpy()
-            else:
-                resampled_audio_array = audio["array"]
-
-            if audio_shift_amount > 0:
-                resampled_audio_array = shift_audio_forward(
-                    resampled_audio_array, audio_shift_amount, target_sampling_rate
-                )
-
-            resampled_audio.append(resampled_audio_array)
+        if example_audio_shift_augmentation > 0:
+            resampled_audio_array = shift_audio_forward(
+                resampled_audio_array, example_audio_shift_augmentation, target_sampling_rate
+            )
 
         # We want to use the device kwargs - we call the feature extractor directly
         # to avoid warning from the tokenizer (which does not know how to consume a device kwarg)
         feature_extraction_result = self.processor.feature_extractor(
-            resampled_audio, sampling_rate=target_sampling_rate, return_attention_mask=True, device=self.device
+            resampled_audio_array, sampling_rate=target_sampling_rate, return_attention_mask=True, device=self.device
         )
 
-        input_feat = feature_extraction_result["input_features"]
-        attn_mask = feature_extraction_result["attention_mask"]
+        input_feat = feature_extraction_result["input_features"][0]
+        attn_mask = feature_extraction_result["attention_mask"][0]
 
-        input_features_to_keep = []
-        pad_values = []
-        pad_amounts = []
-        for input_feat_sample, attn_mask_sample in zip(input_feat, attn_mask):
-            # Only makes sense to compress when we have at least 2 paddings to replace with 1
-            if attn_mask_sample[-3] == 0:
-                # +1 because the STFT window overflows slightly into the first silence padding frame
-                # And the model might learned to use that signal to recognize start of silence.
-                padding_starts_at_index = attn_mask_sample.argmin() + 1
-                padding_vals = input_feat_sample.T[padding_starts_at_index]
-                pad_values.append(padding_vals)
-                input_feat_keep = input_feat_sample.T[:padding_starts_at_index].T
-                input_features_to_keep.append(input_feat_keep)
-                orig_out_features_length = input_feat_sample.shape[-1]
-                pad_amounts.append(np.int32(orig_out_features_length - padding_starts_at_index))
-            else:
-                input_features_to_keep.append(input_feat_sample)
-                pad_values.append(np.array([], dtype=input_feat_sample.dtype))
-                pad_amounts.append(np.int32(0))
+        pad_value = None
+        pad_amount = None
 
-        if not is_batched:
-            input_features_to_keep = input_features_to_keep[0]
-            pad_values = pad_values[0]
-            pad_amounts = pad_amounts[0]
-        result_example["input_features"] = input_features_to_keep
-        result_example["pad_value"] = pad_values
-        result_example["pad_amount"] = pad_amounts
+        # Only makes sense to compress when we have at least 2 paddings to replace with 1
+        if attn_mask[-3] == 0:
+            # +1 because the STFT window overflows slightly into the first silence padding frame
+            # And the model might learned to use that signal to recognize start of silence.
+            padding_starts_at_index = attn_mask.argmin() + 1
+            padding_vals = input_feat.T[padding_starts_at_index]
+            pad_value = padding_vals
+            input_feat_keep = input_feat.T[:padding_starts_at_index].T
+            orig_out_features_length = input_feat.shape[-1]
+            pad_amount = np.int32(orig_out_features_length - padding_starts_at_index)
+        else:
+            input_feat_keep = input_feat
+            pad_value = np.array([], dtype=input_feat.dtype)
+            pad_amount = np.int32(0)
 
-        input_lengths = [len(resampled_audio_array) / target_sampling_rate for resampled_audio_array in resampled_audio]
-        if not is_batched:
-            input_lengths = input_lengths[0]
-        result_example["input_length"] = input_lengths
+        result_example["input_features"] = input_feat_keep
+        result_example["pad_value"] = pad_value
+        result_example["pad_amount"] = pad_amount
+        result_example["input_length"] = len(resampled_audio_array) / target_sampling_rate
 
-    def _prepare_example_text(self, is_batched, example, result_example, text_column_name, format_version) -> None:
-        # Currently v2 format contains timestamped data and the prev transcript to condition on
-        is_v2_format = format_version == "v2"
-        can_add_timestamps = False
-        prev_text_column_name = None
-        tokenizer_kwargs = dict(
-            add_special_tokens=False,  # We will take care of prefixes/suffixes manually
-            # Motivation: sometimes post-training models glue words together.
-            add_prefix_space=True,
-            return_attention_mask=False,
-        )
-        if is_v2_format:
-            text_column_name = "transcript"
-            prev_text_column_name = "prev_transcript"
-            tokenizer_kwargs["add_prefix_space"] = False  # v2 preformatted the text
-
-        text = example[text_column_name]  # Text may contain timestamps
+    def _prepare_example_text(self, example, ancillary_features, result_example) -> None:
+        text = example["transcript"]
+        has_timestamps = example["has_timestamps"] if "has_timestamps" in example else False
+        has_prev = example["has_prev"] if "has_prev" in example else False
+        prev_text = example["prev_transcript"] if has_prev else None
 
         tokenizer_result = self.processor.tokenizer(
             text,
-            **tokenizer_kwargs,
+            # We will take care of prefixes/suffixes manually
+            add_special_tokens=False,
+            # Motivation: sometimes post-training models glue words together.
+            # BUT - if timestamps are present we do not need to add a prefix space to
+            # the text since it was already pre-formatted when timestamps tokens were interleaved into it.
+            add_prefix_space=not has_timestamps,
+            return_attention_mask=False,
         )
+        token_ids = tokenizer_result["input_ids"]
 
-        result_example_labels = []
-        token_ids_batch = tokenizer_result["input_ids"]
+        # for token_ids, has_timestamps, prev_text, has_prev, shift_augmentation in zip(
+        #     token_ids_batch, has_timestamps_batch, prev_text_batch, has_prev_batch, example_shift_augmentation_batch
+        # ):
+        should_train_on_timestamps = bool(self.seed.binomial(1, self.timestamp_sample_prob))
+        should_condition_on_prev = has_prev and bool(self.seed.binomial(1, self.condition_on_prev_sample_prob))
 
-        if not is_batched:
-            token_ids_batch = [token_ids_batch]
+        if has_timestamps and not should_train_on_timestamps:
+            # Remove all timestamp tokens
+            token_ids = [token_id for token_id in token_ids if token_id < self.timestamp_begin_token_id]
+            # Note - no-timestamp token id is prepended as part of the prefix later.
 
-        if is_v2_format:
-            can_add_timestamps = True  # For now assume v2 format always has timestamps
-            prev_text_batch = example[prev_text_column_name]
-            has_prev_batch = example["has_prev"]
+        prev_ids = []
+        if should_condition_on_prev and has_prev:
+            prev_ids = self.processor.tokenizer(
+                prev_text,
+                add_special_tokens=False,
+                # See why above
+                add_prefix_space=not has_timestamps,
+                return_attention_mask=False,
+            )["input_ids"]
 
-            if not is_batched:
-                prev_text_batch = [prev_text_batch]
-                has_prev_batch = [has_prev_batch]
+            if not should_train_on_timestamps and has_timestamps:
+                prev_ids = [token_id for token_id in prev_ids if token_id < self.timestamp_begin_token_id]
 
-            for token_ids, prev_text, has_prev in zip(token_ids_batch, prev_text_batch, has_prev_batch):
+            # Calculate how many prev_ids we want to take
+            max_prev_ids_len_to_take = min(
+                whisper_max_target_positions - len(token_ids)
+                # 3 - Prefix for transcription (sot+lang+task)
+                # 1 - eot token
+                # 1 - Prefix for prev (prev)
+                - 5,
+                # And anyway no more than half the max size
+                self.prev_ids_max_length,
+            )
 
-                should_train_on_timestamps = bool(self.seed.binomial(1, self.timestamp_sample_prob))
-                should_condition_on_prev = bool(self.seed.binomial(1, self.condition_on_prev_sample_prob))
+            # Take as much as we can from the prev_ids
+            prev_ids = prev_ids[-max_prev_ids_len_to_take:]
 
-                if can_add_timestamps and not should_train_on_timestamps:
-                    # Remove all timestamp tokens
-                    token_ids = [token_id for token_id in token_ids if token_id < self.timestamp_begin_token_id]
-                    # Note - no-timestamp token id is prepended as part of the prefix later.
+            # prepend a prev token
+            prev_ids = [self.start_of_prev_token_id] + prev_ids
 
-                prev_ids = []
-                if should_condition_on_prev and has_prev:
-                    prev_ids = self.processor.tokenizer(
-                        prev_text,
-                        **tokenizer_kwargs,
-                    )["input_ids"]
+        # If we don't have timestamps and we don't use prev text, but want to train on timestamps,
+        # and allowed to perform timestamp augmentation, then we need to inject ts tokens.
+        # Know this - prev text labels should include timestamps if the transcription labels do.
+        # Since we are unable to inject timestamps into prev text, we cannot accomplish the injection
+        # in those cases. Hence, the below check of "prev_ids"
+        if should_train_on_timestamps and not has_timestamps and not prev_ids and self.inject_synthetic_timestamps:
+            # Injected timestamps may be "shift forward" augmented.
+            # Audio features would have been augmented accordingly.
+            example_shift_augmentation = ancillary_features["audio_shift_augmentation"]
+            duration = ancillary_features["original_audio_duration"]
 
-                    if not should_train_on_timestamps:
-                        prev_ids = [token_id for token_id in prev_ids if token_id < self.timestamp_begin_token_id]
+            start_at_ts_id = self._get_token_timestamp_for_time(example_shift_augmentation)
+            ends_at = example_shift_augmentation + duration
+            ends_at_ts_id = self._get_token_timestamp_for_time(ends_at)
+            # wrap the text segment with the synthetic injected timestamp tokens
+            # and append prefix/suffix for timestamp decoding
+            token_ids = [start_at_ts_id] + token_ids + [ends_at_ts_id]
+            has_timestamps = True  # So downstream processing handles proper prefixing
 
-                    # Calculate how manh prev_ids we want to take
-                    max_prev_ids_len_to_take = min(
-                        whisper_max_target_positions - len(token_ids)
-                        # 3 - Prefix for transcription (sot+lang+task)
-                        # 1 - eot token
-                        # 1 - Prefix for prev (prev)
-                        - 5,
-                        # And anyway no more than half the max size
-                        self.prev_ids_max_length,
-                    )
+        with_timestamps = has_timestamps and should_train_on_timestamps
+        prefix_tokens = self.prefix_tokens_with_ts if with_timestamps else self.prefix_tokens_no_ts
+        labels_input_ids = prev_ids + prefix_tokens + token_ids + [self.eot_token_id]
 
-                    # Take as much as we can from the prev_ids
-                    prev_ids = prev_ids[-max_prev_ids_len_to_take:]
+        result_example["labels"] = labels_input_ids
 
-                    # prepend a prev token
-                    prev_ids = [self.start_of_prev_token_id] + prev_ids
-
-                with_timestamps = can_add_timestamps and should_train_on_timestamps
-                prefix_tokens = self.prefix_tokens_with_ts if with_timestamps else self.prefix_tokens_no_ts
-                all_input_ids = prev_ids + prefix_tokens + token_ids + [self.eot_token_id]
-
-                result_example_labels.append(all_input_ids)
-
-        else:  # V1 - no timestamps tokens present in the text
-            example_duration_batch = example["extra_data"]["duration"]
-            example_shift_augmentation_batch = result_example["audio_shift_augmentation"]
-
-            if not is_batched:
-                example_duration_batch = [example_duration_batch]
-                example_shift_augmentation_batch = [example_shift_augmentation_batch]
-
-            for token_ids, duration, shift_augmentation in zip(
-                token_ids_batch, example_duration_batch, example_shift_augmentation_batch
-            ):
-                if self.inject_preprocess_timestamps:
-                    start_at_ts_id = self._get_token_timestamp_for_time(shift_augmentation)
-                    ends_at = shift_augmentation + duration
-                    ends_at_ts_id = self._get_token_timestamp_for_time(ends_at)
-                    # wrap the text segment with the synthetic injected timestamp tokens
-                    # and append prefix/suffix for timestamp decoding
-                    all_input_ids = (
-                        self.prefix_tokens_with_ts + [start_at_ts_id] + token_ids + [ends_at_ts_id, self.eot_token_id]
-                    )
-                else:
-                    all_input_ids = self.prefix_tokens_no_ts + token_ids + [self.eot_token_id]
-
-                result_example_labels.append(all_input_ids)
-
-        if not is_batched:
-            result_example_labels = result_example_labels[0]
-
-        result_example["labels"] = result_example_labels
-
-    def _prepare_example_fn(self, example, text_column_name, format_version):
-        is_batched = isinstance(example["audio"], (list, tuple))
+    def _prepare_example_fn(self, input_example_or_batch, text_column_name, format_version):
         try:
-            # Ensure proper naming of the output features
-            # As if we called the processoer with an audio param.
-            # This is a very weird API quirk, but it's what the processor produces so we need to adapt.
+            # A container for the output features
             result_example = BatchFeature({})
+            # A container for ancillary features that are not part of the output features
+            ancillary_features = BatchFeature({})
 
-            self._assign_example_shift_amount(is_batched, example, result_example, format_version)
-            self._prepare_example_audio(is_batched, example, result_example)
-            self._prepare_example_text(is_batched, example, result_example, text_column_name, format_version)
-            self._clear_example_shift_amount(result_example)
+            self._decide_example_augmentation(input_example_or_batch, ancillary_features)
+            self._prepare_example_audio(input_example_or_batch, ancillary_features, result_example)
+            self._prepare_example_text(
+                input_example_or_batch,
+                ancillary_features,
+                result_example,
+            )
 
             return result_example
         except Exception as e:
             print(f"Exception: {e}")
             return None
 
-    def prepare_dataset(self, dataset: Dataset, text_column_name, format_version: str | None, batch_size: int = 1):
-
+    def prepare_dataset(self, dataset: Dataset, text_column_name, format_version: str | None):
         dataset = dataset.cast_column("audio", Audio(sampling_rate=self.target_sampling_rate))
-
-        batch_kwargs = {"batched": batch_size > 1, "batch_size": batch_size}
+        self._validate_dataset_features(dataset)
 
         columns_to_remove = dataset.column_names
         # If a DatasetDict was passed in, it contains multiple splits.
@@ -399,7 +374,6 @@ class DatasetPreparator:
             remove_columns=columns_to_remove,
             num_proc=self.proc_num,
             features=self.output_features,
-            **batch_kwargs,
         )
 
         processed_dataset = self._select_legal_entries(processed_dataset)
@@ -547,13 +521,25 @@ def parse_arguments():
     )
     parser.add_argument("--save_processed", help="Dataset name to save processed data (will save both train and eval)")
     parser.add_argument(
-        "--inject_preprocess_timestamps",
-        help="If a v1 dataset is used, inject synthetic timestamps",
+        "--include_timestamps_prob",
+        type=float,
+        default=0.5,
+        help="Probability to include timestamps with a sample (This might be a synthetic augmentation or an existing transcription timestamps)",
+    )
+    parser.add_argument(
+        "--include_prev_text_prob",
+        type=float,
+        default=0.5,
+        help="Probability to include previous text with a sample only when prev transcript is present on the sample",
+    )
+    parser.add_argument(
+        "--inject_synthetic_timestamps",
+        help="If timestamps are to be included with a sample but not provided, a start+end timestamp token will be injected",
         action="store_true",
     )
     parser.add_argument(
         "--audio_shift_augmentation",
-        help="If a v1 dataset is used, and timestamps are inject, also randomize shift augmentation on it",
+        help="When timestamps are injected, also randomize shift augmentation on it",
         action="store_true",
     )
     parser.add_argument(
@@ -627,9 +613,9 @@ def main():
     preparator = DatasetPreparator(
         processor,
         proc_num=args.ds_processor_proc_num,
-        timestamp_sample_prob=1,
-        condition_on_prev_sample_prob=0.5,
-        inject_preprocess_timestamps=args.inject_preprocess_timestamps,
+        timestamp_sample_prob=args.include_timestamps_prob,
+        condition_on_prev_sample_prob=args.include_prev_text_prob,
+        inject_synthetic_timestamps=args.inject_synthetic_timestamps,
         audio_shift_augmentation=args.audio_shift_augmentation,
     )
 
