@@ -25,6 +25,7 @@ def create_app(**kwargs) -> Callable:
     model = kwargs.get("model")
     device = "cuda" if has_cuda else "auto"
     compute_type = "float16" if has_cuda else "default"
+    print(f"Initializing model {model}...")
     model = faster_whisper.WhisperModel(model, device=device, compute_type=compute_type)
 
     def transcribe_fn(entry):

@@ -5,18 +5,7 @@ from pathlib import Path
 from typing import Dict, Any, Callable
 import anthropic
 
-SYSTEM_PROMPT = """You are an expert in Hebrew transcription post-processing.
-Your task is to improve the transcription by:
-1. Fixing common ASR errors
-2. Correcting grammar and syntax
-3. Maintaining the original meaning
-4. Keeping the style natural and fluent
-
-Only make necessary changes. If the transcription seems correct, return it as is.
-Wrap your response in <improved> tags, like this:
-<improved>your improved text here</improved>
-
-Respond with the improved text in XML tags only, no explanations."""
+SYSTEM_PROMPT = """You are an expert in Hebrew transcription post-processing."""
 
 
 def extract_improved_text(text: str) -> str:
@@ -30,7 +19,7 @@ def extract_improved_text(text: str) -> str:
 def create_app(**kwargs) -> Callable:
     model_path = kwargs.get("model")
     base_engine_path = kwargs.get("base_engine", "engines/faster_whisper_engine.py")
-    llm_model = kwargs.get("llm_model", "claude-3-opus-20240229")
+    llm_model = kwargs.get("llm_model", "claude-3-5-sonnet-20241022")
 
     # Import the base engine
     base_engine_path = Path(base_engine_path)
@@ -51,13 +40,29 @@ def create_app(**kwargs) -> Callable:
         if not text.strip():
             return text
 
+        instructions = """Your task is to improve the transcription by:
+1. Fixing common ASR errors
+2. Fixing spelling issues.
+3. Fixing similarly-sounding segments to make sense, while maintaining sound.
+
+Do NOT make changes to style or wording unless they are clearly an ASR error.
+
+Only make necessary changes. If the transcription seems correct, return it as is.
+Wrap your response in <improved> tags, like this:
+<improved>your improved text here</improved>
+
+Respond with the improved text in XML tags only, no explanations.
+
+Here is the text to improve:
+"""
+
         try:
             response = client.messages.create(
                 model=llm_model,
                 system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": text}],
+                messages=[{"role": "user", "content": instructions + text}],
                 temperature=0.1,  # Low temperature for more consistent results
-                max_tokens=1000,
+                max_tokens=8192,
             )
             return extract_improved_text(response.content[0].text)
         except Exception as e:
