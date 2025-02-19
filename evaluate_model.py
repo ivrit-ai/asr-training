@@ -2,11 +2,14 @@
 
 import argparse
 import concurrent.futures
+import os
+
 import datasets
 import jiwer
 import pandas
-from hebrew import Hebrew
 import whisper.normalizers
+from hebrew import Hebrew
+from tqdm import tqdm
 
 
 def clean_some_unicode_from_text(text):
@@ -65,11 +68,26 @@ def process_entry(args):
         if key not in ["audio", text_column]:
             entry_data[f"metadata_{key}"] = entry[key]
 
-    print(
-        f"Evaluated entry {i+1}, WER={entry_metrics.wer}, WIL={entry_metrics.wil}, ref_text={ref_text}, eval_text={eval_text}"
-    )
     return entry_data
 
+
+def calculate_final_metrics(df: pandas.DataFrame):
+    df = df.sort_values(by=["id"])
+    df["reference_text"] = df["reference_text"].fillna("")
+    df["predicted_text"] = df["predicted_text"].fillna("")
+
+    # convert to list of dicts
+    entries_data = df.to_dict(orient="records")
+
+    htn = HebrewTextNormalizer()
+
+    # Calculate final metrics
+    results = jiwer.process_words(
+        [htn(entry["reference_text"]) for entry in entries_data],
+        [htn(entry["predicted_text"]) for entry in entries_data],
+    )
+
+    return results
 
 def evaluate_model(transcribe_fn, ds, text_column, num_workers=1):
     normalizer = HebrewTextNormalizer()
@@ -78,22 +96,26 @@ def evaluate_model(transcribe_fn, ds, text_column, num_workers=1):
     # Prepare arguments for parallel processing
     process_args = [(i, ds[i], transcribe_fn, text_column, normalizer) for i in range(len(ds))]
 
-    # Process entries in parallel
+    # Process entries in parallel with progress tracking
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-        entries_data = list(executor.map(process_entry, process_args))
+        # Submit tasks
+        futures = [executor.submit(process_entry, arg) for arg in process_args]
+
+        # Use tqdm to track progress
+        entries_data = []
+        with tqdm(total=len(futures), desc="Processing entries") as pbar:
+            for future in concurrent.futures.as_completed(futures):
+                entry = future.result()
+                entries_data.append(entry)
+                last_wer = entry["wer"]
+                last_wil = entry["wil"]
+                pbar.set_postfix(last_wer=f"{last_wer:.5f}", last_wil=f"{last_wil:.5f}")
+                pbar.update(1)
 
     # Sort results by ID to maintain original order
     entries_data.sort(key=lambda x: x["id"])
 
-    # Calculate final metrics
-    final_metrics = jiwer.process_words(
-        [entry["norm_reference_text"] for entry in entries_data],
-        [entry["norm_predicted_text"] for entry in entries_data],
-    )
-
-    results_df = pandas.DataFrame(entries_data)
-    return final_metrics, results_df
-
+    return pandas.DataFrame(entries_data)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate a speech-to-text model.")
@@ -105,40 +127,49 @@ if __name__ == "__main__":
     parser.add_argument("--name", type=str, required=False, help="Optional name parameter for dataset.load_dataset")
     parser.add_argument("--output", type=str, default="evaluation_results.csv", help="Output CSV file path")
     parser.add_argument("--workers", type=int, default=1, help="Number of parallel workers to use for evaluation")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite exists outputs, otherwise - reuse them")
 
     args = parser.parse_args()
 
-    # Import the engine module
-    import importlib.util
+    output_exists = os.path.exists(args.output)
 
-    spec = importlib.util.spec_from_file_location("engine", args.engine)
-    engine = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(engine)
-
-    print(f"Loading engine {args.engine} with model {args.model}...")
-    transcribe_fn = engine.create_app(model_path=args.model)
-
-    print(f"Loading dataset {args.dataset}...")
-    dataset_parts = args.dataset.split(":")
-    dataset_name = dataset_parts[0]
-    dataset_split = dataset_parts[1] if len(dataset_parts) > 1 else "test"
-    ds_text_column = dataset_parts[2] if len(dataset_parts) > 2 else "text"
-
-    if args.name:
-        ds = datasets.load_dataset(dataset_name, name=args.name, trust_remote_code=True)[dataset_split]
+    if output_exists and not args.overwrite:
+        results_df = pandas.read_csv(args.output)
     else:
-        ds = datasets.load_dataset(dataset_name, trust_remote_code=True)[dataset_split]
+        # Import the engine module
+        import importlib.util
 
-    print(f"Beginning evaluation with {args.workers} workers.")
-    metrics, results_df = evaluate_model(transcribe_fn, ds, ds_text_column, args.workers)
+        spec = importlib.util.spec_from_file_location("engine", args.engine)
+        engine = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(engine)
+
+        print(f"Loading engine {args.engine} with model {args.model}...")
+        transcribe_fn = engine.create_app(model_path=args.model)
+
+        print(f"Loading dataset {args.dataset}...")
+        dataset_parts = args.dataset.split(":")
+        dataset_name = dataset_parts[0]
+        dataset_split = dataset_parts[1] if len(dataset_parts) > 1 else "test"
+        ds_text_column = dataset_parts[2] if len(dataset_parts) > 2 else "text"
+
+        if args.name:
+            ds = datasets.load_dataset(dataset_name, name=args.name, trust_remote_code=True)[dataset_split]
+        else:
+            ds = datasets.load_dataset(dataset_name, trust_remote_code=True)[dataset_split]
+
+        print(f"Beginning evaluation with {args.workers} workers.")
+        results_df = evaluate_model(transcribe_fn, ds, ds_text_column, args.workers)
+
+        # Add model and dataset info as columns
+        results_df["model"] = args.model
+        results_df["dataset"] = dataset_name
+        results_df["dataset_split"] = dataset_split
+        results_df["engine"] = args.engine
+
+        results_df.to_csv(args.output, encoding="utf-8", index=False)
+        print(f"Results saved to {args.output}")
+
+    # Calculate final metrics
+    metrics = calculate_final_metrics(results_df)
 
     print(f"Evaluation done. WER={metrics.wer}, WIL={metrics.wil}.")
-
-    # Add model and dataset info as columns
-    results_df["model"] = args.model
-    results_df["dataset"] = dataset_name
-    results_df["dataset_split"] = dataset_split
-    results_df["engine"] = args.engine
-
-    results_df.to_csv(args.output, encoding="utf-8", index=False)
-    print(f"Results saved to {args.output}")
