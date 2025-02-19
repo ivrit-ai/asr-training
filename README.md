@@ -42,6 +42,11 @@ The following datasets are part of the evaluation suite:
 | common_voice_17   | [mozilla-foundation/common_voice_17_0](https://huggingface.co/datasets/mozilla-foundation/common_voice_17_0) | test       | sentence      | he                         | ✅    |
 | hebrew_speech_kan | [imvladikon/hebrew_speech_kan](https://huggingface.co/datasets/imvladikon/hebrew_speech_kan)                 | validation | sentence      | -                          | ❌    |
 
+## Leaderboard
+
+We publish the results on the [HF Leaderboard](https://huggingface.co/spaces/ivrit-ai/hebrew-transcription-leaderboard).
+Contact us to add your model to the leaderboard.
+
 ## Common Problems
 
 ## `Unable to load any of {libcudnn_ops.so.9.1.0, libcudnn_ops.so.9.1, libcudnn_ops.so.9, libcudnn_ops.so}`
