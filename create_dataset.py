@@ -160,7 +160,7 @@ def generate_slices(
                     continue
 
             slice_segment = {
-                "start": curr_input_segment.start - slice_start,  # relative to slice
+                "start": max(0, curr_input_segment.start - slice_start),  # relative to slice
             }
             curr_slice_segments.append(slice_segment)
 
@@ -177,7 +177,7 @@ def generate_slices(
                 #  /    \  /          \??????
                 # |_________________________|
                 #                     ^
-                slice_segment["end"] = curr_input_segment_end - slice_start  # relative to slice
+                slice_segment["end"] = min(slice_length, curr_input_segment_end - slice_start)  # relative to slice
                 slice_segment["text"] = curr_input_segment.text
 
                 # entire segment is included - no need to reference it again on the next slice.
