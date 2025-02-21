@@ -441,7 +441,7 @@ if __name__ == "__main__":
         default=0,
         help="Quality threshold for per-segment quality filtering (0-1 below this threshold a segment and it's surrounding slice are dropped)",
     )
-    parser.add_argument("--push_to_hub", type=bool, default=False, help="Push the dataset to the hub")
+    parser.add_argument("--push_to_hub", action="store_true", help="Push the dataset to the hub")
     parser.add_argument(
         "--output_dataset_name", type=str, help="Name of the dataset, Omit to not store any dataset (dry-run)"
     )
