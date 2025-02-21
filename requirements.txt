@@ -1,3 +1,4 @@
+audiosample==2.2.6
 bitsandbytes
 datasets
 faster-whisper
@@ -27,3 +28,4 @@ google-cloud-storage
 amazon-transcribe
 hebrew
 runpod
+stable_ts==2.18.3
