@@ -321,11 +321,14 @@ def prepare_training_dataset(
     # Shuffle source entries to approach more homogenous shard sizes
     shuffle(input_manifest)
 
+    # Limit the number of source entries to process
+    if max_source_entries:
+        input_manifest = input_manifest[:max_source_entries]
+
     # Aim for 10 entries per worker within each chunk
     manifest_processing_chunk_size = num_proc * per_proc_per_chunk_size
 
     def examples_from_entry_generator(input_manifest_shards):
-        processed_source_entries = 0
         for audio_file, segments_data_file, metadata_file in input_manifest_shards:
             try:
                 # Load captions
@@ -368,10 +371,6 @@ def prepare_training_dataset(
                         yield example
             except Exception as e:
                 logger.error(f"Error processing {audio_file}: {e}")
-
-            processed_source_entries += 1
-            if max_source_entries is not None and processed_source_entries >= max_source_entries:
-                break
 
     input_manifest_chunks = [
         input_manifest[i : i + manifest_processing_chunk_size]
