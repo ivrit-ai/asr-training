@@ -455,7 +455,7 @@ if __name__ == "__main__":
         type=str,
         help="Version of the dataset to set in dataset info",
     )
-    parser.add_argument("--push_as_public", type=bool, default=True, help="Push the dataset as public")
+    parser.add_argument("--push_as_public", action="store_true", help="Push the dataset as public")
     parser.add_argument(
         "--clear_output_dataset_cache_files",
         action="store_true",
