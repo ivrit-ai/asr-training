@@ -8,7 +8,7 @@ import uuid
 from tqdm import tqdm
 from stable_whisper.result import WhisperResult, Segment
 from audiosample import AudioSample
-from datasets import Dataset, DatasetDict, concatenate_datasets
+from datasets import Dataset, DatasetDict, concatenate_datasets, Audio as AudioColumnType
 
 
 logger = logging.getLogger(__name__)
@@ -395,6 +395,9 @@ def prepare_training_dataset(
         )
 
     examples_dataset = concatenate_datasets(all_datasets)
+    examples_dataset = examples_dataset.cast_column(
+        "audio", AudioColumnType(sampling_rate=WHISPER_EXPECTED_SAMPLE_RATE)
+    )
 
     return examples_dataset
 
