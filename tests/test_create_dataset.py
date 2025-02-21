@@ -158,16 +158,71 @@ test_cases = [
             Segment(words=[WordTiming("Hello", 15, 25, 0.9)]),
             Segment(words=[WordTiming("Im Gone", 31, 35, 0.9)]),
             Segment(words=[WordTiming("low", 36, 38, 0.2)]),
-            Segment(words=[WordTiming("World", 65, 75, 0.9)]),
+            Segment(words=[WordTiming("World", 67, 75, 0.9)]),
         ],
         80,
         [
             {"seek": 0, "segments": [{"start": 15, "end": 25, "text": "Hello"}]},
             {"seek": 30, "segments": []},
-            {"seek": 60, "segments": [{"start": 5, "end": 15, "text": "World"}]},
+            {"seek": 38, "segments": []},
+            {"seek": 67, "segments": [{"start": 0, "end": 8, "text": "World"}]},
         ],
         0.5,
         id="low_quality_end_segment_drops_slice",
+    ),
+    pytest.param(
+        [
+            Segment(words=[WordTiming("Hello", 15, 25, 0.9)]),
+            Segment(words=[WordTiming("Im Gone", 31, 35, 0.9)]),
+            Segment(words=[WordTiming("low", 36, 38, 0.2)]),
+            Segment(words=[WordTiming("World", 61, 69, 0.9)]),
+        ],
+        80,
+        [
+            {"seek": 0, "segments": [{"start": 15, "end": 25, "text": "Hello"}]},
+            {"seek": 30, "segments": []},
+            {"seek": 38, "segments": []},
+            # The following slice contains a segment that crossed over from the previous slice
+            # but was the only segment so it started it's own slice
+            {"seek": 61, "segments": [{"start": 0, "end": 8, "text": "World"}]},
+        ],
+        0.5,
+        id="mix_of_drop_and_cross_overs",
+    ),
+    pytest.param(
+        [
+            Segment(words=[WordTiming("Hello", 15, 25, 0.9)]),
+            Segment(words=[WordTiming("Im Gone", 31, 35, 0.9)]),
+            Segment(words=[WordTiming("low", 36, 38, 0.2)]),
+            Segment(words=[WordTiming("World", 61, 69, 0.9)]),
+            Segment(words=[WordTiming("Crossing", 90, 92, 0.9)]),
+        ],
+        95,
+        [
+            {"seek": 0, "segments": [{"start": 15, "end": 25, "text": "Hello"}]},
+            {"seek": 30, "segments": []},
+            {"seek": 38, "segments": []},
+            {"seek": 61, "segments": [{"start": 0, "end": 8, "text": "World"}, {"start": 29}]},
+            {"seek": 69, "segments": [{"start": 21, "end": 23, "text": "Crossing"}]},
+        ],
+        0.5,
+        id="mix_of_drop_and_cross_overs_more_complex",
+    ),
+    pytest.param(
+        [
+            Segment(words=[WordTiming("Hello", 2, 4, 0.9)]),
+            Segment(words=[WordTiming("World", 29, 35, 0.9)]),
+        ],
+        40,
+        [
+            {"seek": 0, "segments": [{"start": 2, "end": 4, "text": "Hello"}, {"start": 29}]},
+            # Segment that crossed over still ends outside the slice, and the only one
+            {"seek": 4, "segments": []},
+            # so it opens it's own new slice
+            {"seek": 29, "segments": [{"start": 0, "end": 6, "text": "World"}]},
+        ],
+        0.5,
+        id="twice_crossed_over_push",
     ),
 ]
 
