@@ -445,6 +445,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output_dataset_name", type=str, help="Name of the dataset, Omit to not store any dataset (dry-run)"
     )
+    parser.add_argument(
+        "--dataset_name",
+        type=str,
+        help="Name of the dataset to set in dataset info",
+    )
+    parser.add_argument(
+        "--dataset_version",
+        type=str,
+        help="Version of the dataset to set in dataset info",
+    )
     parser.add_argument("--push_as_public", type=bool, default=True, help="Push the dataset as public")
     parser.add_argument(
         "--clear_output_dataset_cache_files",
@@ -467,6 +477,11 @@ if __name__ == "__main__":
     )
 
     if output_dataset:
+        if args.dataset_name:
+            output_dataset.info.dataset_name = args.dataset_name
+        if args.dataset_version:
+            output_dataset.info.version = args.dataset_version
+
         if args.validation_split_size > 0:
             # If a validation split is requested, split the dataset in main
             assert args.validation_split_size < 1.0, "validation_split_size must be a float between 0 and 1"
