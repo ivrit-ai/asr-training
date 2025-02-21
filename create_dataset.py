@@ -9,6 +9,7 @@ from tqdm import tqdm
 from stable_whisper.result import WhisperResult, Segment
 from audiosample import AudioSample
 from datasets import Dataset, DatasetDict, concatenate_datasets, Audio as AudioColumnType
+from huggingface_hub import DatasetCard, DatasetCardData, upload_file
 
 
 logger = logging.getLogger(__name__)
@@ -453,10 +454,24 @@ if __name__ == "__main__":
         help="Name of the dataset to set in dataset info",
     )
     parser.add_argument(
+        "--dataset_license_file",
+        type=str,
+        help="A license file to upload as the dataset license",
+    )
+    parser.add_argument(
         "--dataset_version",
         type=str,
         help="Version of the dataset to set in dataset info",
     )
+    parser.add_argument("--dataset_card_language", type=str, help="Language of the dataset for the dataset card")
+    parser.add_argument("--dataset_card_license", type=str, help="License of the dataset for the dataset card")
+    parser.add_argument(
+        "--dataset_card_language_creators", type=str, nargs="+", help="Language creators type for the dataset card"
+    )
+    parser.add_argument(
+        "--dataset_card_task_categories", type=str, nargs="+", help="Task categories for the dataset card"
+    )
+    parser.add_argument("--dataset_card_pretty_name", type=str, help="Pretty name for the dataset card")
     parser.add_argument("--push_as_public", action="store_true", help="Push the dataset as public")
     parser.add_argument(
         "--clear_output_dataset_cache_files",
@@ -484,6 +499,26 @@ if __name__ == "__main__":
         if args.dataset_version:
             output_dataset.info.version = args.dataset_version
 
+        # Create dataset card if any of the card-related arguments are provided
+        dataset_card = None
+        if any(
+            [
+                args.dataset_card_language,
+                args.dataset_card_license,
+                args.dataset_card_language_creators,
+                args.dataset_card_task_categories,
+                args.dataset_card_pretty_name,
+            ]
+        ):
+            card_data = DatasetCardData(
+                language=args.dataset_card_language,
+                license=args.dataset_card_license,
+                language_creators=args.dataset_card_language_creators,
+                task_categories=args.dataset_card_task_categories,
+                pretty_name=args.dataset_card_pretty_name,
+            )
+            dataset_card = DatasetCard.from_template(card_data, template_path="assets/ivritai_dataset_card_template.md")
+
         if args.validation_split_size > 0:
             # If a validation split is requested, split the dataset in main
             assert args.validation_split_size < 1.0, "validation_split_size must be a float between 0 and 1"
@@ -495,10 +530,24 @@ if __name__ == "__main__":
                 if not args.push_as_public:
                     logger.warning("Pushing the dataset to the hub as private")
                 output_dataset.push_to_hub(args.output_dataset_name, private=not args.push_as_public)
+                # Push dataset card if it was created
+                if dataset_card:
+                    dataset_card.push_to_hub(repo_id=args.output_dataset_name, repo_type="dataset")
+
+                if args.dataset_license_file and Path(args.dataset_license_file).exists():
+                    upload_file(
+                        path_or_fileobj=args.dataset_license_file,
+                        repo_id=args.output_dataset_name,
+                        path_in_repo="LICENSE",
+                        repo_type="dataset",
+                    )
             else:
                 output_dataset.save_to_disk(args.output_dataset_name)
+                # Save dataset card if it was created
+                if dataset_card:
+                    logger.warning("Dataset card will be saved locally since push_to_hub is not enabled")
+                    dataset_card.save(f"{args.output_dataset_name}/README.md")
 
-        else:
             # report the created dataset sizes per split
             if isinstance(output_dataset, DatasetDict):
                 for split, ds in output_dataset.items():

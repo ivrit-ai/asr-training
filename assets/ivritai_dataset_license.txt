@@ -1,0 +1,17 @@
+ivrit.ai license (v2, October 1st, 2024)
+
+This material and data (the “Data”) made available by ivrit.ai are made available under the terms of the Creative Commons Attribution 4.0 International License (CC BY 4.0), The full text of the CC-BY 4.0 license is available at https://creativecommons.org/licenses/by/4.0/.
+
+Notwithstanding the foregoing, the Data may only be used, modified and distributed for the express purpose of either (a) training AI models, or (b) academic research. In addition, the Data may not be used in order to create audiovisual material that simulates the voice or likeness of the specific individuals appearing or speaking in such materials and data (a “deep-fake”). The Data may not be distributed in violation of applicable export controls or economic sanctions. To the extent this paragraph is inconsistent with the CC-BY-4.0 license, the terms of this paragraph shall govern.
+
+By downloading or using any of the Data, you agree that the Project makes no representations or warranties in respect of the Data, and shall have no liability in respect thereof. These disclaimers and limitations are in addition to any disclaimers and limitations set forth in the CC-BY-4.0 license itself. You understand that the project is only able to make available the Data pursuant to these disclaimers and limitations, and without such disclaimers and limitations the project would not be able to make available the Data for your use.
+
+ivrit.ai also provides a translation of the foregoing license into the Hebrew language. The translation is for informational purposes only, and in the event of any conflict or inconsistency between the Hebrew translation and the original English of the license, the English version shall govern. No warranty is provided in respect of the accuracy of the translation.
+
+ivrit.ai license (v1, June 30th, 2023)
+
+This material and data is licensed under the terms of the Creative Commons Attribution 4.0 International License (CC BY 4.0), The full text of the CC-BY 4.0 license is available at https://creativecommons.org/licenses/by/4.0/.
+
+Notwithstanding the foregoing, this material and data may only be used, modified and distributed for the express purpose of training AI models, and subject to the foregoing restriction. In addition, this material and data may not be used in order to create audiovisual material that simulates the voice or likeness of the specific individuals appearing or speaking in such materials and data (a “deep-fake”). To the extent this paragraph is inconsistent with the CC-BY-4.0 license, the terms of this paragraph shall govern.
+
+By downloading or using any of this material or data, you agree that the Project makes no representations or warranties in respect of the data, and shall have no liability in respect thereof. These disclaimers and limitations are in addition to any disclaimers and limitations set forth in the CC-BY-4.0 license itself. You understand that the project is only able to make available the materials and data pursuant to these disclaimers and limitations, and without such disclaimers and limitations the project would not be able to make available the materials and data for your use.
