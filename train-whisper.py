@@ -220,13 +220,38 @@ def parse_arguments():
         help="Reference dataset(s) for evaluation. Format: dataset_name[:split_name]",
     )
     parser.add_argument(
+        "--save_only_model", 
+        action="store_true", 
+        default=False, 
+        help="Save only the model without optimizer state"
+    )
+    parser.add_argument(
+        "--max_checkpoints_to_keep", 
+        type=int, 
+        default=None, 
+        help="Maximum number of checkpoints to keep during training"
+    )
+    parser.add_argument(
         "--resume_from_checkpoint", action="store_true", help="Try and resuming for last saved checkpoint"
     )
     parser.add_argument(
         "--resume_from_checkpoint_path", type=str, help="Path to checkpoint to resume from", default=None
     )
+    parser.add_argument("--save_steps", type=int, default=500, help="Number of steps between each model save/upload.")
     parser.add_argument(
         "--ignore_data_skip", action="store_true", help="Ignore data skip when resuming from checkpoint"
+    )
+    parser.add_argument(
+        "--mixed_precision", 
+        choices=["bf16", "fp16", "tf32", None], 
+        default=None, 
+        help="Mixed precision mode for training"
+    )
+    parser.add_argument(
+        "--attn_implementation",
+        default=None,
+        choices=["sdpa"],
+        help="Attention implementation to use (only 'sdpa' available)"
     )
     parser.add_argument("--use_qlora", action="store_true", help="Use QLoRA for training")
     parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate")
@@ -246,7 +271,11 @@ def parse_arguments():
     parser.add_argument(
         "--eval_steps", type=int, help="Number of steps between two evals, if not specified defaults to logging_steps."
     )
-    parser.add_argument("--save_steps", type=int, default=500, help="Number of steps between each model save/upload.")
+    parser.add_argument(
+        "--predict_wer", 
+        action="store_true", 
+        help="Use WER as the metric for best model instead of loss"
+    )
     parser.add_argument("--max_eval_set_size", type=int, help="Maximum number of entries to fetch from eval dataset.")
 
     parser.add_argument("--per_device_train_batch_size", type=int, default=16, help="Per-device train batch size.")
@@ -254,6 +283,7 @@ def parse_arguments():
 
     parser.add_argument("--run_name", help="Run name to report to the run tracker")
     parser.add_argument("--logging_steps", type=int, default=500, help="Number of step between each log")
+    
 
     return parser.parse_args()
 
@@ -347,7 +377,7 @@ def main():
             args.model_name, quantization_config=BitsAndBytesConfig(load_in_8bit=True)
         )
     else:
-        model = WhisperForConditionalGeneration.from_pretrained(args.model_name)
+        model = WhisperForConditionalGeneration.from_pretrained(args.model_name, attn_implementation=args.attn_implementation)
     model.config.forced_decoder_ids = None
     model.config.suppress_tokens = []
 
@@ -384,12 +414,26 @@ def main():
         save_steps=args.save_steps,
         report_to="all" if args.run_name else "none",
         load_best_model_at_end=False,
-        metric_for_best_model="wer",
+        metric_for_best_model="wer" if args.predict_wer else "loss",
         greater_is_better=False,
         push_to_hub=(not args.skip_push_to_hub),
         run_name=args.run_name,
         hub_model_id=f"{args.hf_org_name}/{args.output_model_name}" if not args.skip_push_to_hub else None,
         remove_unused_columns=False,
+
+        # Configure mixed precision based on the argument
+        bf16=True if args.mixed_precision == "bf16" else None,
+        fp16=True if args.mixed_precision == "fp16" else None,
+        tf32=True if args.mixed_precision == "tf32" else None,
+        
+        # Configure prediction loss and metric based on predict_wer
+        prediction_loss_only=False if args.predict_wer else True,
+        
+        # Configure save_total_limit if max_checkpoints_to_keep is provided
+        save_total_limit=args.max_checkpoints_to_keep,
+        
+        # Configure save_only_model
+        save_only_model=True if args.save_only_model else None,
     )
 
     trainer = Seq2SeqTrainer(
