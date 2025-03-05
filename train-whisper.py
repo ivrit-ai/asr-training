@@ -291,7 +291,7 @@ def parse_arguments():
 def main():
     args = parse_arguments()
 
-    if args.use_preprocessed and (args.train_datasets or args.eval_dataset):
+    if args.use_preprocessed and (args.train_datasets or args.eval_datasets):
         raise ValueError("Cannot use both preprocessed data and specify train/eval datasets. Choose one method.")
 
     if args.use_preprocessed and args.save_processed:
