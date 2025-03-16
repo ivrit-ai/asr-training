@@ -56,4 +56,6 @@ If the evaluation engine `faster-whisper` is used the following error may show u
 The CTranslate 2 engine depends on CUDNN to run on Nvidia GPUs. This library is actually installed already using pip but is not on the dynamic library path most likely.
 The following line will put it on path for the current session. If you use a virtual env - make sure it's active before running it so it can infer the correct pip folder.
 
+```
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:`python3 -c 'import os; import nvidia.cublas.lib; import nvidia.cudnn.lib; print(os.path.dirname(nvidia.cublas.lib.__file__) + ":" + os.path.dirname(nvidia.cudnn.lib.__file__))'`
+```
