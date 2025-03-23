@@ -49,6 +49,7 @@ def main():
     parser.add_argument("--output-dir", required=True, help="Directory to store evaluation results")
     parser.add_argument("--workers", type=int, default=1, help="Number of parallel workers")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output files if exists")
+    parser.add_argument("--device", type=str, default="auto", help="copmute device")
     args = parser.parse_args()
 
     # Ensure engine script exists
@@ -93,6 +94,8 @@ def main():
             str(args.workers),
             "--output",
             output_file,
+            "--device",
+            args.device
         ]
 
         if args.overwrite:

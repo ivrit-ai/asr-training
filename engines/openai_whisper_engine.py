@@ -1,8 +1,9 @@
 import io
-import soundfile
-import pydub
 import os
-from typing import Dict, Any, Callable
+from typing import Callable
+
+import pydub
+import soundfile
 import whisper
 from transformers import WhisperForConditionalGeneration
 
@@ -42,6 +43,10 @@ def create_app(**kwargs) -> Callable:
         print(f"Loading tuned model {tuned_model_path}...")
         tuned_model = WhisperForConditionalGeneration.from_pretrained(tuned_model_path)
         model = copy_hf_model_weights_to_openai_model_weights(tuned_model, model)
+
+    device: str = kwargs.get("device", None)
+    if device:
+        model.to(device)
 
     def transcribe(entry):
         wav_buffer = io.BytesIO()
