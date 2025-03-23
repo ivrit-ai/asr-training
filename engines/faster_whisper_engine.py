@@ -1,7 +1,8 @@
 import io
-import soundfile
-from typing import Dict, Any, Callable
+from typing import Any, Callable, Dict
+
 import faster_whisper
+import soundfile
 
 
 def transcribe(model, entry: Dict[str, Any]) -> str:
@@ -19,7 +20,13 @@ def transcribe(model, entry: Dict[str, Any]) -> str:
 
 def create_app(**kwargs) -> Callable:
     model_path = kwargs.get("model_path")
-    model = faster_whisper.WhisperModel(model_path)
+    device: str = kwargs.get("device", "auto")
+    device_index = None
+    if len(device.split(":")) == 2:
+        device, device_index = device.split(":")
+        device_index = int(device_index)
+
+    model = faster_whisper.WhisperModel(model_path, device=device, device_index=device_index)
 
     def transcribe_fn(entry):
         return transcribe(model, entry)
