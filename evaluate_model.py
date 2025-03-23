@@ -128,6 +128,7 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=str, default="evaluation_results.csv", help="Output CSV file path")
     parser.add_argument("--workers", type=int, default=1, help="Number of parallel workers to use for evaluation")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite exists outputs, otherwise - reuse them")
+    parser.add_argument("--device", type=str, default="auto", help="Compute device")
 
     args = parser.parse_args()
 
@@ -144,7 +145,7 @@ if __name__ == "__main__":
         spec.loader.exec_module(engine)
 
         print(f"Loading engine {args.engine} with model {args.model}...")
-        transcribe_fn = engine.create_app(model_path=args.model)
+        transcribe_fn = engine.create_app(model_path=args.model, device=args.device)
 
         print(f"Loading dataset {args.dataset}...")
         dataset_parts = args.dataset.split(":")
