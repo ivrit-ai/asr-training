@@ -7,6 +7,7 @@ import uuid
 
 from tqdm import tqdm
 from stable_whisper.result import WhisperResult, Segment
+from stable_whisper.audio import AudioLoader
 from audiosample import AudioSample
 from datasets import (
     Dataset,
@@ -229,10 +230,16 @@ def generate_slices(
     return slices
 
 
-def get_slice_audio_data(audio_data, slice, slice_length):
+def get_slice_audio_data(audio_loader: AudioLoader, slice, slice_length):
     audio_start_sec = slice["seek"]
-    audio_end_sec = audio_start_sec + slice_length
-    return audio_data[audio_start_sec:audio_end_sec]
+    seek_sample = int(audio_start_sec * WHISPER_EXPECTED_SAMPLE_RATE)
+    slice_length_samples = int(slice_length * WHISPER_EXPECTED_SAMPLE_RATE)
+    audio_data = audio_loader.next_chunk(seek_sample, slice_length_samples)
+    slice_audio_data_as_mp3 = AudioSample(
+        audio_data.numpy(), force_read_format="s16le", force_read_sample_rate=WHISPER_EXPECTED_SAMPLE_RATE
+    ).as_data(no_encode=False, force_out_format="mp3")
+
+    return slice_audio_data_as_mp3
 
 
 def get_timestamp_token_text(seconds: float) -> str:
@@ -250,7 +257,7 @@ def get_timestamp_token_text(seconds: float) -> str:
         raise ValueError("Timestamp token out of range.")
 
 
-def generate_examples_from_slices(slices, slice_length, audio_data, metadata: dict) -> Iterator[dict]:
+def generate_examples_from_slices(slices, slice_length, audio_loader, metadata: dict) -> Iterator[dict]:
     source_id = metadata.get("source_id", "unknown")
     source_entry_id = metadata.get("source_entry_id", str(uuid.uuid4()))
     logger.debug(f"Generating dataset from {source_id}/{source_entry_id}")
@@ -272,10 +279,10 @@ def generate_examples_from_slices(slices, slice_length, audio_data, metadata: di
                     slice_text += get_timestamp_token_text(segment["start"])
                     if "text" in segment:
                         slice_text += f'{segment["text"]}{get_timestamp_token_text(segment["end"])}'
-                slice_audio_data = get_slice_audio_data(audio_data, slice, slice_length)
+                slice_audio_data = get_slice_audio_data(audio_loader, slice, slice_length)
                 example = {
                     "audio": {
-                        "bytes": slice_audio_data.as_data(no_encode=False, force_out_format="mp3"),
+                        "bytes": slice_audio_data,
                         "path": source_entry_id,
                     },
                     "transcript": slice_text,
@@ -359,12 +366,10 @@ def prepare_training_dataset(
                     )
                     continue
 
-                # Load Audio
-                with AudioSample(
-                    load_audio_in_whisper_format(audio_file, sr=WHISPER_EXPECTED_SAMPLE_RATE),
-                    force_read_sample_rate=WHISPER_EXPECTED_SAMPLE_RATE,
-                ) as audio_data:
-                    audio_duration = audio_data.duration
+                # Load Audio (streams output from an FFMPEG process for memory efficiency)
+                audio_loader = AudioLoader(str(audio_file), stream=True, sr=WHISPER_EXPECTED_SAMPLE_RATE)
+                try:
+                    audio_duration = audio_loader.get_duration()
 
                     # Create slices of the captions with the intended slice
                     slices = generate_slices(segments, audio_duration, slice_length, per_segment_quality_threshold)
@@ -373,10 +378,12 @@ def prepare_training_dataset(
                     for example in generate_examples_from_slices(
                         slices,
                         slice_length,
-                        audio_data,
+                        audio_loader,
                         metadata,
                     ):
                         yield example
+                finally:
+                    audio_loader.terminate()
             except Exception as e:
                 logger.error(f"Error processing {audio_file}: {e}")
 
@@ -420,12 +427,12 @@ def prepare_training_dataset(
                 continue
             else:
                 raise  # Re-raise unexpected errors
-        
+
         all_datasets.append(generated_dataset)
 
     if not all_datasets:
         return None
-    
+
     examples_dataset = concatenate_datasets(all_datasets)
     examples_dataset = examples_dataset.cast_column(
         "audio", AudioColumnType(sampling_rate=WHISPER_EXPECTED_SAMPLE_RATE)
