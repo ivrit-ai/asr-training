@@ -8,7 +8,14 @@ import uuid
 from tqdm import tqdm
 from stable_whisper.result import WhisperResult, Segment
 from audiosample import AudioSample
-from datasets import Dataset, DatasetDict, concatenate_datasets, Audio as AudioColumnType
+from datasets import (
+    Dataset,
+    DatasetDict,
+    concatenate_datasets,
+    Audio as AudioColumnType,
+    Value as ValueColumnType,
+    Features,
+)
 from huggingface_hub import DatasetCard, DatasetCardData, upload_file
 
 
@@ -326,7 +333,7 @@ def prepare_training_dataset(
     if max_source_entries:
         input_manifest = input_manifest[:max_source_entries]
 
-    # Aim for 10 entries per worker within each chunk
+    # Aim for reasonable entries per worker within each chunk
     manifest_processing_chunk_size = num_proc * per_proc_per_chunk_size
 
     def examples_from_entry_generator(input_manifest_shards):
@@ -387,14 +394,38 @@ def prepare_training_dataset(
     # maintaining parallel generation within each chunk.
     all_datasets = []
     for input_manifest_chunk in tqdm(input_manifest_chunks, desc="Generating input manifest chunks"):
-        all_datasets.append(
-            Dataset.from_generator(
+        try:
+            generated_dataset = Dataset.from_generator(
                 examples_from_entry_generator,
                 num_proc=num_proc,
                 gen_kwargs={"input_manifest_shards": list(input_manifest_chunk)},
+                features=Features(
+                    {
+                        "audio": AudioColumnType(),
+                        "transcript": ValueColumnType(dtype="string"),
+                        "metadata": {
+                            "seek": ValueColumnType(dtype="float32"),
+                            "source": ValueColumnType(dtype="string"),
+                            "entry_id": ValueColumnType(dtype="string"),
+                        },
+                        "has_prev": ValueColumnType(dtype="bool"),
+                        "has_timestamps": ValueColumnType(dtype="bool"),
+                        "prev_transcript": ValueColumnType(dtype="string"),
+                    }
+                ),
             )
-        )
+        except ValueError as e:
+            if "corresponds to no data" in str(e):
+                print("Skipping dataset creation because no data was found.")
+                continue
+            else:
+                raise  # Re-raise unexpected errors
+        
+        all_datasets.append(generated_dataset)
 
+    if not all_datasets:
+        return None
+    
     examples_dataset = concatenate_datasets(all_datasets)
     examples_dataset = examples_dataset.cast_column(
         "audio", AudioColumnType(sampling_rate=WHISPER_EXPECTED_SAMPLE_RATE)
