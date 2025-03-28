@@ -99,19 +99,6 @@ def load_audio_in_whisper_format(file: str, sr: int = WHISPER_EXPECTED_SAMPLE_RA
     return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
 
 
-def create_captions_from_segments(segments_data: WhisperResult):
-    captions = []
-    for segment in segments_data.segments:
-        captions.append(
-            {
-                "start": segment.start,
-                "end": segment.end,
-                "text": segment.text,
-            }
-        )
-    return captions
-
-
 def calculate_segment_quality_score(segment: Segment) -> float:
     """Calculate the quality score based on the median word probabilities for a single segment."""
     try:
