@@ -360,6 +360,12 @@ def prepare_training_dataset(
             try:
                 # Load captions
                 segments_data = WhisperResult(str(segments_data_file))
+
+                # Improve segment sizes:
+                # merge when 400ms only gap and below
+                # re split if more than 70 words
+                # clamp words at start/end max duration (ratio of 2.5 to medium duration by default).
+                segments_data.regroup("mg=.4_sl=70_cm")
                 segments = segments_data.segments
 
                 # Load metadata
@@ -379,7 +385,7 @@ def prepare_training_dataset(
                     continue
 
                 # Load Audio (streams output from an FFMPEG process for memory efficiency)
-                audio_loader = AudioLoader(str(audio_file), stream=True, sr=WHISPER_EXPECTED_SAMPLE_RATE)
+                audio_loader = AudioLoader(str(audio_file), stream=True, sr=WHISPER_EXPECTED_SAMPLE_RATE, buffer_size=int(3 * slice_length * WHISPER_EXPECTED_SAMPLE_RATE))
                 try:
                     audio_duration = audio_loader.get_duration()
 
@@ -548,7 +554,7 @@ if __name__ == "__main__":
     if not isinstance(numeric_level, int):
         raise ValueError("Invalid log level: %s" % args.log_level)
     else:
-        logging.basicConfig(level=numeric_level)
+        logger.setLevel(level=numeric_level)
 
     # Prepare the dataset
     output_dataset = prepare_training_dataset(
