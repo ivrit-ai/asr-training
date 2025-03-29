@@ -251,10 +251,12 @@ def generate_examples_from_slices(slices, slice_length, audio_loader, metadata: 
 
     # No slices - nothing to do
     if not slices:
+        logger.debug(f"No slices in {source_id}/{source_entry_id}")
         return None
 
     # At least one segments we can work on is expected
     if next(iter([seg for s in slices for seg in s["segments"]]), None) is None:
+        logger.debug(f"No segments in {source_id}/{source_entry_id}")
         return None
 
     prev_example = None
@@ -293,6 +295,8 @@ def generate_examples_from_slices(slices, slice_length, audio_loader, metadata: 
                 )
         else:
             prev_example = None
+
+    logger.debug(f"Done with samples from {source_id}/{source_entry_id}")
 
 
 def prepare_training_dataset(
@@ -503,8 +507,16 @@ if __name__ == "__main__":
         action="store_true",
         help="Clear the HF cache for the output dataset on disk",
     )
+    parser.add_argument("--log_level", type=str, default="INFO", help="Log level of the general logger.")
 
     args = parser.parse_args()
+
+    # Configure Logger
+    numeric_level = getattr(logging, args.log_level.upper(), None)
+    if not isinstance(numeric_level, int):
+        raise ValueError("Invalid log level: %s" % args.log_level)
+    else:
+        logging.basicConfig(level=numeric_level)
 
     # Prepare the dataset
     output_dataset = prepare_training_dataset(
