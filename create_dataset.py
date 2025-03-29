@@ -126,11 +126,13 @@ def generate_slices(
     slices = []
     while next_slice_start < audio_duration:
         slice_start = next_slice_start
-        
+
         # Ensure current segment exists
         # and validate it's duration.
         if curr_input_segment_idx < len(input_segments):
-            curr_input_segment_duration = input_segments[curr_input_segment_idx].end - input_segments[curr_input_segment_idx].start
+            curr_input_segment_duration = (
+                input_segments[curr_input_segment_idx].end - input_segments[curr_input_segment_idx].start
+            )
             # If the first segment to work on is too long for a single slice we must skip it.
             if curr_input_segment_duration > slice_length:
                 if curr_input_segment_idx + 1 < len(input_segments):
@@ -257,7 +259,9 @@ def get_timestamp_token_text(seconds: float) -> str:
         raise ValueError("Timestamp token out of range.")
 
 
-def generate_examples_from_slices(slices, slice_length, audio_loader, metadata: dict) -> Iterator[dict]:
+def generate_examples_from_slices(
+    slices, slice_length, audio_loader, metadata: dict, copy_metadata_fields: list[str] = []
+) -> Iterator[dict]:
     source_id = metadata.get("source_id", "unknown")
     source_entry_id = metadata.get("source_entry_id", str(uuid.uuid4()))
     logger.debug(f"Generating dataset from {source_id}/{source_entry_id}")
@@ -300,6 +304,9 @@ def generate_examples_from_slices(slices, slice_length, audio_loader, metadata: 
                 if prev_example:
                     example["prev_transcript"] = prev_example["transcript"]
                     example["has_prev"] = True
+                if copy_metadata_fields:
+                    for field_to_copy in copy_metadata_fields:
+                        example["metadata"][field_to_copy] = metadata.get(field_to_copy, None)
                 yield example
                 prev_example = example
             except Exception as e:
@@ -323,6 +330,7 @@ def prepare_training_dataset(
     per_proc_per_chunk_size: int = 10,
     per_sample_quality_threshold: float = 0,
     per_segment_quality_threshold: float = 0,
+    copy_metadata_fields: list[str] = [],
 ) -> Dataset:
     """
     Prepare captioned datasets from the input folder.
@@ -384,6 +392,7 @@ def prepare_training_dataset(
                         slice_length,
                         audio_loader,
                         metadata,
+                        copy_metadata_fields,
                     ):
                         yield example
                 finally:
@@ -406,24 +415,28 @@ def prepare_training_dataset(
     all_datasets = []
     for input_manifest_chunk in tqdm(input_manifest_chunks, desc="Generating input manifest chunks"):
         try:
+            dataset_features = Features(
+                {
+                    "audio": AudioColumnType(),
+                    "transcript": ValueColumnType(dtype="string"),
+                    "metadata": {
+                        "seek": ValueColumnType(dtype="float32"),
+                        "source": ValueColumnType(dtype="string"),
+                        "entry_id": ValueColumnType(dtype="string"),
+                    },
+                    "has_prev": ValueColumnType(dtype="bool"),
+                    "has_timestamps": ValueColumnType(dtype="bool"),
+                    "prev_transcript": ValueColumnType(dtype="string"),
+                }
+            )
+            if copy_metadata_fields:
+                for field_to_copy in copy_metadata_fields:
+                    dataset_features["metadata"][field_to_copy] = ValueColumnType(dtype="string")
             generated_dataset = Dataset.from_generator(
                 examples_from_entry_generator,
                 num_proc=num_proc,
                 gen_kwargs={"input_manifest_shards": list(input_manifest_chunk)},
-                features=Features(
-                    {
-                        "audio": AudioColumnType(),
-                        "transcript": ValueColumnType(dtype="string"),
-                        "metadata": {
-                            "seek": ValueColumnType(dtype="float32"),
-                            "source": ValueColumnType(dtype="string"),
-                            "entry_id": ValueColumnType(dtype="string"),
-                        },
-                        "has_prev": ValueColumnType(dtype="bool"),
-                        "has_timestamps": ValueColumnType(dtype="bool"),
-                        "prev_transcript": ValueColumnType(dtype="string"),
-                    }
-                ),
+                features=dataset_features,
             )
         except ValueError as e:
             if "corresponds to no data" in str(e):
@@ -486,6 +499,12 @@ if __name__ == "__main__":
         default=0,
         help="Quality threshold for per-segment quality filtering (0-1 below this threshold a segment and it's surrounding slice are dropped)",
     )
+    parser.add_argument(
+        "--copy_metadata_fields",
+        nargs="*",
+        default=[],
+        help="specify dataset specific metadata fields to copy into output segments from souce entries",
+    )
     parser.add_argument("--push_to_hub", action="store_true", help="Push the dataset to the hub")
     parser.add_argument(
         "--output_dataset_name", type=str, help="Name of the dataset, Omit to not store any dataset (dry-run)"
@@ -541,6 +560,7 @@ if __name__ == "__main__":
         per_proc_per_chunk_size=args.per_proc_per_chunk_size,
         per_sample_quality_threshold=args.per_sample_quality_threshold,
         per_segment_quality_threshold=args.per_segment_quality_threshold,
+        copy_metadata_fields=args.copy_metadata_fields,
     )
 
     if output_dataset:
