@@ -126,6 +126,19 @@ def generate_slices(
     slices = []
     while next_slice_start < audio_duration:
         slice_start = next_slice_start
+        
+        # Ensure current segment exists
+        # and validate it's duration.
+        if curr_input_segment_idx < len(input_segments):
+            curr_input_segment_duration = input_segments[curr_input_segment_idx].end - input_segments[curr_input_segment_idx].start
+            # If the first segment to work on is too long for a single slice we must skip it.
+            if curr_input_segment_duration > slice_length:
+                if curr_input_segment_idx + 1 < len(input_segments):
+                    next_slice_start = input_segments[curr_input_segment_idx + 1].start
+                    curr_input_segment_idx += 1
+                    continue
+                else:
+                    break
 
         curr_slice_segments = []
         curr_slice = {"segments": curr_slice_segments, "seek": slice_start}
