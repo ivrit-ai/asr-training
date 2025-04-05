@@ -52,7 +52,6 @@ test_cases = [
         ],
         30,
         [
-            {"seek": 0, "segments": [{"start": 0, "end": 30, "text": "Hello"}]},
         ],
         0,
         id="segment_end_over_audio_duration",
@@ -224,10 +223,49 @@ test_cases = [
         0.5,
         id="twice_crossed_over_push",
     ),
+    pytest.param(
+        [
+            Segment(words=[WordTiming("Hello", 2, 35, 0.9)])
+        ],
+        40,
+        [
+        ],
+        0.5,
+        id="too_long_for_any_slice_alone",
+    ),
+    pytest.param(
+        [
+            Segment(words=[WordTiming("Hello", 2, 4, 0.9)]),
+            Segment(words=[WordTiming("World", 29, 60, 0.9)]),
+        ],
+        62,
+        [
+            {"seek": 0, "segments": [{"start": 2, "end": 4, "text": "Hello"}, {"start": 29}]},
+            # Segment that crossed over still ends outside the slice and too long for even a single slice
+            # so not created
+        ],
+        0.5,
+        id="too_long_for_any_slice_cross_over",
+    ),
+    pytest.param(
+        [
+            Segment(words=[WordTiming("Hello", 2, 35, 0.9)]),
+            Segment(words=[WordTiming("World", 36, 56, 0.9)]),
+        ],
+        60,
+        [
+            {"seek": 36, "segments": [{"start": 0, "end": 20, "text": "World"}]},
+            # Segment that crossed over still ends outside the slice and too long for even a single slice
+            # so not created
+        ],
+        0.5,
+        id="too_long_for_any_slice_continues_normally",
+    ),
 ]
 
 
 @pytest.mark.parametrize("input_segments,audio_duration,expected_slices,per_segment_quality_threshold", test_cases)
+@pytest.mark.timeout(2)
 def test_generate_slices(input_segments, audio_duration, expected_slices, per_segment_quality_threshold):
     """Test generating slices with parameterized test cases"""
     # Act
@@ -241,15 +279,16 @@ def test_generate_slices(input_segments, audio_duration, expected_slices, per_se
     # Assert
     assert len(result) == len(expected_slices), "Should generate expected number of slices"
 
-    for slice_idx, (result_slice, expected_slice) in enumerate(zip(result, expected_slices)):
-        assert result_slice["seek"] == expected_slice["seek"], f"Slice {slice_idx} seek mismatch"
-        assert len(result_slice["segments"]) == len(
-            expected_slice["segments"]
-        ), f"Slice {slice_idx} should have expected segments"
+    if len(result) > 0:
+        for slice_idx, (result_slice, expected_slice) in enumerate(zip(result, expected_slices)):
+            assert result_slice["seek"] == expected_slice["seek"], f"Slice {slice_idx} seek mismatch"
+            assert len(result_slice["segments"]) == len(
+                expected_slice["segments"]
+            ), f"Slice {slice_idx} should have expected segments"
 
-        for seg_idx, (result_seg, expected_seg) in enumerate(zip(result_slice["segments"], expected_slice["segments"])):
-            assert result_seg["start"] == expected_seg["start"], f"Segment {seg_idx} start mismatch"
-            if "end" in expected_seg:
-                assert result_seg["end"] == expected_seg["end"], f"Segment {seg_idx} end mismatch"
-            if "text" in expected_seg:
-                assert result_seg["text"] == expected_seg["text"], f"Segment {seg_idx} text mismatch"
+            for seg_idx, (result_seg, expected_seg) in enumerate(zip(result_slice["segments"], expected_slice["segments"])):
+                assert result_seg["start"] == expected_seg["start"], f"Segment {seg_idx} start mismatch"
+                if "end" in expected_seg:
+                    assert result_seg["end"] == expected_seg["end"], f"Segment {seg_idx} end mismatch"
+                if "text" in expected_seg:
+                    assert result_seg["text"] == expected_seg["text"], f"Segment {seg_idx} text mismatch"
