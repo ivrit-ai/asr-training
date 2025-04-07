@@ -433,12 +433,6 @@ def prepare_training_dataset(
             try:
                 # Load captions
                 segments_data = WhisperResult(str(segments_data_file))
-
-                # Improve segment sizes:
-                # merge when 300ms only gap and below
-                # but not if the result is over 25 words
-                # clamp words at start/end max duration (ratio of 2.5 to medium duration by default).
-                # segments_data.regroup("mg=.3+25++1_cm")
                 segments = segments_data.segments
 
                 # Load metadata
