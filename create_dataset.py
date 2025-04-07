@@ -232,6 +232,78 @@ def generate_slices(
     return slices
 
 
+def merge_slice_segments(slices: list[dict], merge_below_gap_threshold: float = 0.3) -> list[dict]:
+    """
+    Merge segments within each slice that are close together.
+
+    Args:
+        slices: List of slices, each containing a list of segments
+        merge_below_gap_threshold: Merge segments if gap between them is less than this threshold (in seconds)
+
+    Returns:
+        List of slices with merged segments
+    """
+    if not slices:
+        return slices
+
+    result_slices = []
+
+    for slice_data in slices:
+        # Create a new slice with the same properties as the original, but copy it to avoid modifying the original
+        new_slice = {key: value for key, value in slice_data.items() if key != "segments"}
+        new_slice["segments"] = []
+
+        segments = slice_data.get("segments", [])
+
+        # If no segments or only one segment, no merging needed
+        if len(segments) <= 1:
+            new_slice["segments"] = [segment.copy() for segment in segments]
+            result_slices.append(new_slice)
+            continue
+
+        # Create a copy of segments to process
+        result_segments = [segment.copy() for segment in segments]
+
+        # Process segments in reverse order
+        i = len(result_segments) - 1
+        while i > 0:  # Stop at index 1 (second segment)
+            current_segment = result_segments[i]
+            prev_segment = result_segments[i - 1]
+
+            # Check if we can merge the current segment with the previous one
+            can_merge = False
+
+            # Current segment must have start, end, and text to be mergeable
+            # Note: No "end" cases means an open-only slice where the last segment
+            # mark a segment which could not end within the same slice. we need
+            # to keep it as is.
+            if all(key in current_segment for key in ["start", "end", "text"]):
+
+                # Calculate the gap between segments
+                gap = current_segment["start"] - prev_segment["end"]
+
+                # Check if the gap is small enough
+                if gap < merge_below_gap_threshold:
+                    can_merge = True
+
+            if can_merge:
+                # Merge current segment into previous segment
+                prev_segment["end"] = current_segment["end"]
+                prev_segment["text"] = prev_segment["text"] + current_segment["text"]
+
+                # Remove the current segment as it's now merged
+                result_segments.pop(i)
+
+            # Move to previous segment
+            i -= 1
+
+        # Add all processed segments to the new slice
+        new_slice["segments"] = result_segments
+        result_slices.append(new_slice)
+
+    return result_slices
+
+
 def get_slice_audio_data(audio_loader: AudioLoader, slice, slice_length):
     audio_start_sec = slice["seek"]
     seek_sample = int(audio_start_sec * WHISPER_EXPECTED_SAMPLE_RATE)
@@ -386,12 +458,18 @@ def prepare_training_dataset(
                     continue
 
                 # Load Audio (streams output from an FFMPEG process for memory efficiency)
-                audio_loader = AudioLoader(str(audio_file), stream=True, sr=WHISPER_EXPECTED_SAMPLE_RATE, buffer_size=int(3 * slice_length * WHISPER_EXPECTED_SAMPLE_RATE))
+                audio_loader = AudioLoader(
+                    str(audio_file),
+                    stream=True,
+                    sr=WHISPER_EXPECTED_SAMPLE_RATE,
+                    buffer_size=int(3 * slice_length * WHISPER_EXPECTED_SAMPLE_RATE),
+                )
                 try:
                     audio_duration = audio_loader.get_duration()
 
                     # Create slices of the captions with the intended slice
                     slices = generate_slices(segments, audio_duration, slice_length, per_segment_quality_threshold)
+                    slices = merge_slice_segments(slices)
 
                     # Generate the dataset
                     for example in generate_examples_from_slices(
