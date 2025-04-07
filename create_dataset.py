@@ -294,6 +294,7 @@ def generate_examples_from_slices(
                     "transcript": slice_text,
                     "metadata": {
                         "seek": float(slice["seek"]),
+                        "duration": slice_length,
                         "source": source_id,
                         "entry_id": source_entry_id,
                     },
@@ -362,10 +363,10 @@ def prepare_training_dataset(
                 segments_data = WhisperResult(str(segments_data_file))
 
                 # Improve segment sizes:
-                # merge when 400ms only gap and below
-                # re split if more than 70 words
+                # merge when 300ms only gap and below
+                # but not if the result is over 25 words
                 # clamp words at start/end max duration (ratio of 2.5 to medium duration by default).
-                segments_data.regroup("mg=.4_sl=70_cm")
+                # segments_data.regroup("mg=.3+25++1_cm")
                 segments = segments_data.segments
 
                 # Load metadata
@@ -427,6 +428,7 @@ def prepare_training_dataset(
                     "transcript": ValueColumnType(dtype="string"),
                     "metadata": {
                         "seek": ValueColumnType(dtype="float32"),
+                        "duration": ValueColumnType(dtype="float32"),
                         "source": ValueColumnType(dtype="string"),
                         "entry_id": ValueColumnType(dtype="string"),
                     },
