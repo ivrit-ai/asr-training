@@ -301,6 +301,7 @@ def main():
         audio_shift_augmentation=args.audio_shift_augmentation,
     )
 
+    dataset_shuffle_seed = 745
     if args.use_preprocessed:
         preprocessed_dataset_dicts = []
         for preprocessed in args.use_preprocessed:
@@ -328,7 +329,7 @@ def main():
                 # otherwise - the dataloader across each process ends up with different lengths
                 # which screws up the collective synchronization
                 # See https://huggingface.co/docs/accelerate/en/concept_guides/internal_mechanism
-                seed=745,
+                seed=dataset_shuffle_seed,
             )
             eval_set = interleave_datasets(
                 [d["eval"] for d in preprocessed_dataset_dicts],
@@ -336,7 +337,7 @@ def main():
                 stopping_strategy="all_exhausted",
                 # We set the seed so each distributed process will interleave in the same way
                 # See above.
-                seed=722,
+                seed=dataset_shuffle_seed,
             )
 
     elif args.save_processed:
@@ -365,7 +366,7 @@ def main():
         eval_set = process_datasets(eval_datasets, preparator)
 
     if args.max_eval_set_size:
-        eval_set = eval_set.select(range(args.max_eval_set_size))
+        eval_set = eval_set.shuffle(seed=dataset_shuffle_seed).select(range(args.max_eval_set_size))
 
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(
         processor=processor, decoder_start_token_id=processor.tokenizer.convert_tokens_to_ids("<|startoftranscript|>")
