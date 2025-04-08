@@ -6,6 +6,56 @@ from create_dataset import generate_slices
 test_cases = [
     pytest.param(
         [
+            Segment(0, 0, "Zero"),
+            Segment(15, 20, "Hello"),
+        ],
+        30,
+        [
+            {
+                "seek": 15,
+                "segments": [{"start": 0, "end": 5, "text": "Hello"}],
+            }
+        ],
+        0,
+        id="first_zero_len_segment_skipped",
+    ),
+    pytest.param(
+        [
+            Segment(15, 20, "Hello"),
+            Segment(40, 40, "Zero"),
+        ],
+        30,
+        [
+            {
+                "seek": 0,
+                "segments": [{"start": 15, "end": 20, "text": "Hello"}],
+            },
+        ],
+        0,
+        id="last_zero_len_segment_skipped",
+    ),
+    pytest.param(
+        [
+            Segment(15, 20, "Hello"),
+            Segment(35, 35, "Zero"),
+            Segment(40, 45, "World"),
+        ],
+        45,
+        [
+            {
+                "seek": 0,
+                "segments": [{"start": 15, "end": 20, "text": "Hello"}],
+            },
+            {
+                "seek": 40,
+                "segments": [{"start": 0, "end": 5, "text": "World"}],
+            },
+        ],
+        0,
+        id="mid_zero_len_segment_skipped",
+    ),
+    pytest.param(
+        [
             Segment(0, 10, "Hello"),
             Segment(15, 20, "World"),
         ],
@@ -51,8 +101,7 @@ test_cases = [
             Segment(0, 35, "Hello"),
         ],
         30,
-        [
-        ],
+        [],
         0,
         id="segment_end_over_audio_duration",
     ),
@@ -94,119 +143,99 @@ test_cases = [
     pytest.param(
         [
             Segment(words=[WordTiming("Hello", 5, 15, 0.9)]),
-            Segment(words=[WordTiming("low", 20, 35, 0.2)]),
+            Segment(words=[WordTiming("low", 20, 35, 0.1)]),
         ],
         45,
         [
-            {"seek": 0, "segments": [{"start": 5, "end": 15, "text": "Hello"}]},
-            {"seek": 30, "segments": []},
+            {"seek": 0, "segments": []},
         ],
-        0.5,
-        id="last_low_quality_segment_ignored",
+        0.8,
+        id="low_quality_slice_dropped_last_seg_low_quality",
     ),
     pytest.param(
         [
-            Segment(words=[WordTiming("low", 5, 10, 0.2)]),
-            Segment(words=[WordTiming("Hello", 15, 25, 0.9)]),
+            Segment(words=[WordTiming("low", 5, 15, 0.1)]),
+            Segment(words=[WordTiming("Hello", 20, 35, 0.9)]),
         ],
         45,
         [
-            {"seek": 0, "segments": [{"start": 15, "end": 25, "text": "Hello"}]},
-            {"seek": 30, "segments": []},
+            {"seek": 0, "segments": []},
+            {"seek": 20, "segments": [{"start": 0, "end": 15, "text": "Hello"}]},
         ],
-        0.5,
-        id="first_low_quality_segment_ignored",
+        0.8,
+        id="low_quality_slice_dropped_first_seg_low_quality",
     ),
     pytest.param(
         [
-            Segment(words=[WordTiming("Hello", 15, 25, 0.9)]),
-            Segment(words=[WordTiming("low", 31, 35, 0.2)]),
-            Segment(words=[WordTiming("Im Pushed", 36, 38, 0.9)]),
-            Segment(words=[WordTiming("World", 67, 75, 0.9)]),
+            Segment(words=[WordTiming("Hello", 5, 10, 0.8)]),
+            Segment(words=[WordTiming("low", 15, 20, 0.1)]),
+            Segment(words=[WordTiming("low", 20, 21, 0.1)]),
+            Segment(words=[WordTiming("low", 21, 22, 0.1)]),
+            Segment(words=[WordTiming("low", 22, 23, 0.1)]),
+            Segment(words=[WordTiming("World", 25, 30, 0.8)]),
         ],
-        80,
+        30,
         [
-            {"seek": 0, "segments": [{"start": 15, "end": 25, "text": "Hello"}]},
-            {"seek": 30, "segments": []},
-            {"seek": 35, "segments": [{"start": 1, "end": 3, "text": "Im Pushed"}]},
-            {"seek": 65, "segments": [{"start": 2, "end": 10, "text": "World"}]},
+            {"seek": 0, "segments": []},
+            {"seek": 25, "segments": [{"start": 0, "end": 5, "text": "World"}]},
         ],
-        0.5,
-        id="low_quality_start_segment_drops_slice",
+        0.8,
+        id="low_quality_slice_dropped_mid_seg_low_quality",
     ),
     pytest.param(
         [
-            Segment(words=[WordTiming("Hello", 15, 25, 0.9)]),
-            Segment(words=[WordTiming("Im Gone", 31, 35, 0.9)]),
-            Segment(words=[WordTiming("low", 36, 38, 0.2)]),
-            Segment(words=[WordTiming("Im Pushed", 39, 42, 0.9)]),
-            Segment(words=[WordTiming("World", 69, 75, 0.9)]),
+            Segment(words=[WordTiming("Hello", 5, 10, 0.8)]),
+            Segment(words=[WordTiming("low", 15, 20, 0.1)]),
+            Segment(words=[WordTiming("low", 20, 21, 0.1)]),
+            Segment(words=[WordTiming("low", 21, 22, 0.1)]),
+            Segment(words=[WordTiming("low", 22, 23, 0.1)]),
+            Segment(words=[WordTiming("World", 25, 35, 0.8)]),
         ],
-        80,
+        35,
         [
-            {"seek": 0, "segments": [{"start": 15, "end": 25, "text": "Hello"}]},
-            {"seek": 30, "segments": []},
-            {"seek": 38, "segments": [{"start": 1, "end": 4, "text": "Im Pushed"}]},
-            {"seek": 68, "segments": [{"start": 1, "end": 7, "text": "World"}]},
+            {"seek": 0, "segments": []},
+            {"seek": 25, "segments": [{"start": 0, "end": 10, "text": "World"}]},
         ],
-        0.5,
-        id="low_quality_middle_segment_drops_slice",
+        0.8,
+        id="low_quality_slice_dropped_cross_over_good_quality",
     ),
     pytest.param(
         [
-            Segment(words=[WordTiming("Hello", 15, 25, 0.9)]),
-            Segment(words=[WordTiming("Im Gone", 31, 35, 0.9)]),
-            Segment(words=[WordTiming("low", 36, 38, 0.2)]),
-            Segment(words=[WordTiming("World", 67, 75, 0.9)]),
+            Segment(words=[WordTiming("Hello", 5, 10, 0.8)]),
+            Segment(words=[WordTiming("low", 15, 20, 0.1)]),
+            Segment(words=[WordTiming("low", 20, 21, 0.1)]),
+            Segment(words=[WordTiming("low", 21, 22, 0.1)]),
+            Segment(words=[WordTiming("low", 22, 23, 0.1)]),
+            Segment(words=[WordTiming("World", 35, 45, 0.9)]),
         ],
-        80,
+        45,
         [
-            {"seek": 0, "segments": [{"start": 15, "end": 25, "text": "Hello"}]},
-            {"seek": 30, "segments": []},
-            {"seek": 38, "segments": []},
-            {"seek": 67, "segments": [{"start": 0, "end": 8, "text": "World"}]},
+            {"seek": 0, "segments": []},
+            {"seek": 35, "segments": [{"start": 0, "end": 10, "text": "World"}]},
         ],
-        0.5,
-        id="low_quality_end_segment_drops_slice",
+        0.8,
+        id="low_quality_slice_dropped_no_good_quality_in_slice",
     ),
     pytest.param(
         [
-            Segment(words=[WordTiming("Hello", 15, 25, 0.9)]),
-            Segment(words=[WordTiming("Im Gone", 31, 35, 0.9)]),
-            Segment(words=[WordTiming("low", 36, 38, 0.2)]),
-            Segment(words=[WordTiming("World", 61, 69, 0.9)]),
+            Segment(words=[WordTiming("Hello", 5, 10, 0.8)]),
+            Segment(words=[WordTiming("World", 20, 30, 0.9)]),
+            Segment(words=[WordTiming("low", 32, 33, 0.1)]),
+            Segment(words=[WordTiming("low", 33, 34, 0.1)]),
+            Segment(words=[WordTiming("low", 34, 35, 0.1)]),
+            Segment(words=[WordTiming("low", 35, 36, 0.1)]),
+            Segment(words=[WordTiming("high", 36, 37, 0.9)]),
         ],
-        80,
+        45,
         [
-            {"seek": 0, "segments": [{"start": 15, "end": 25, "text": "Hello"}]},
+            {"seek": 0, "segments": [{"start": 5, "end": 10, "text": "Hello"}, {"start": 20, "end": 30, "text": "World"}]},
             {"seek": 30, "segments": []},
-            {"seek": 38, "segments": []},
-            # The following slice contains a segment that crossed over from the previous slice
-            # but was the only segment so it started it's own slice
-            {"seek": 61, "segments": [{"start": 0, "end": 8, "text": "World"}]},
+            {"seek": 36, "segments": [{"start": 0, "end": 1, "text": "high"}]},
         ],
-        0.5,
-        id="mix_of_drop_and_cross_overs",
+        0.8,
+        id="low_quality_slice_dropped_not_the_first_slice",
     ),
-    pytest.param(
-        [
-            Segment(words=[WordTiming("Hello", 15, 25, 0.9)]),
-            Segment(words=[WordTiming("Im Gone", 31, 35, 0.9)]),
-            Segment(words=[WordTiming("low", 36, 38, 0.2)]),
-            Segment(words=[WordTiming("World", 61, 69, 0.9)]),
-            Segment(words=[WordTiming("Crossing", 90, 92, 0.9)]),
-        ],
-        95,
-        [
-            {"seek": 0, "segments": [{"start": 15, "end": 25, "text": "Hello"}]},
-            {"seek": 30, "segments": []},
-            {"seek": 38, "segments": []},
-            {"seek": 61, "segments": [{"start": 0, "end": 8, "text": "World"}, {"start": 29}]},
-            {"seek": 69, "segments": [{"start": 21, "end": 23, "text": "Crossing"}]},
-        ],
-        0.5,
-        id="mix_of_drop_and_cross_overs_more_complex",
-    ),
+    
     pytest.param(
         [
             Segment(words=[WordTiming("Hello", 2, 4, 0.9)]),
@@ -224,12 +253,9 @@ test_cases = [
         id="twice_crossed_over_push",
     ),
     pytest.param(
-        [
-            Segment(words=[WordTiming("Hello", 2, 35, 0.9)])
-        ],
+        [Segment(words=[WordTiming("Hello", 2, 35, 0.9)])],
         40,
-        [
-        ],
+        [],
         0.5,
         id="too_long_for_any_slice_alone",
     ),
@@ -261,6 +287,28 @@ test_cases = [
         0.5,
         id="too_long_for_any_slice_continues_normally",
     ),
+    pytest.param(
+        [
+            Segment(5, 10, "Hello"),
+            Segment(15, 20, "World"),
+        ],
+        15,  # Audio duration shorter than slice_length (30)
+        [
+            {"seek": 0, "segments": [{"start": 5, "end": 10, "text": "Hello"}]},
+        ], 
+        0,
+        id="audio_duration_shorter_than_slice_length",
+    ),
+    pytest.param(
+        [
+            Segment(5, 10, "Hello"),
+            Segment(15, 20, "World"),
+        ],
+        0,  # Zero audio duration
+        [],  # Expect empty slices list
+        0,
+        id="zero_audio_duration",
+    ),
 ]
 
 
@@ -286,7 +334,9 @@ def test_generate_slices(input_segments, audio_duration, expected_slices, per_se
                 expected_slice["segments"]
             ), f"Slice {slice_idx} should have expected segments"
 
-            for seg_idx, (result_seg, expected_seg) in enumerate(zip(result_slice["segments"], expected_slice["segments"])):
+            for seg_idx, (result_seg, expected_seg) in enumerate(
+                zip(result_slice["segments"], expected_slice["segments"])
+            ):
                 assert result_seg["start"] == expected_seg["start"], f"Segment {seg_idx} start mismatch"
                 if "end" in expected_seg:
                     assert result_seg["end"] == expected_seg["end"], f"Segment {seg_idx} end mismatch"

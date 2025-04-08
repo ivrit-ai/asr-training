@@ -99,16 +99,20 @@ def load_audio_in_whisper_format(file: str, sr: int = WHISPER_EXPECTED_SAMPLE_RA
     return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
 
 
-def calculate_segment_quality_score(segment: Segment) -> float:
+def calculate_segments_quality_score(segments: list[Segment]) -> float:
+    if not segments:
+        return 0
+
     """Calculate the quality score based on the median word probabilities for a single segment."""
     try:
-        word_probs = []
-        if segment.has_words:
-            for word in segment.words:
-                if hasattr(word, "probability"):
-                    word_probs.append(word.probability)
-
-        quality_score = float(np.median(word_probs)) if word_probs else 0.0
+        all_word_probs = []
+        for segment in segments:
+            if segment.has_words:
+                for word in segment.words:
+                    if hasattr(word, "probability"):
+                        all_word_probs.append(word.probability)
+        # Calculate the median probability of all words in the segment
+        quality_score = float(np.median(all_word_probs)) if all_word_probs else 0.0
         return quality_score
 
     except Exception:
@@ -133,43 +137,37 @@ def generate_slices(
             curr_input_segment_duration = (
                 input_segments[curr_input_segment_idx].end - input_segments[curr_input_segment_idx].start
             )
-            # If the first segment to work on is too long for a single slice we must skip it.
-            if curr_input_segment_duration > slice_length:
+            # If the first segment to work on is too long for a single slice or of 0 length we must skip it.
+            if curr_input_segment_duration > slice_length or curr_input_segment_duration == 0:
+                # skip if any segment ahead
                 if curr_input_segment_idx + 1 < len(input_segments):
                     next_slice_start = input_segments[curr_input_segment_idx + 1].start
                     curr_input_segment_idx += 1
-                    continue
+                # or break since nothing more to work on
                 else:
-                    break
+                    next_slice_start = audio_duration
 
+                continue
+
+        curr_slice_source_segment_idxs = []
+        curr_slice_source_segments = []
         curr_slice_segments = []
         curr_slice = {"segments": curr_slice_segments, "seek": slice_start}
         slices.append(curr_slice)
         # normal slice length is the expected slice hop - but this could be overridden below. See comments.
         next_slice_start = slice_start + slice_length
-        # clip the slice end to the audio duration
+        # clip the slice end to the total audio duration
         slice_end = min(next_slice_start, audio_duration)
+
+        # While more segments to work on and the current segment start is within the slice
         while curr_input_segment_idx < len(input_segments) and input_segments[curr_input_segment_idx].start < slice_end:
             curr_input_segment = input_segments[curr_input_segment_idx]
-            segment_quality_score = calculate_segment_quality_score(curr_input_segment)
 
-            # Low quality segments are ignored
-            # We assume they represent text which is not in the audio.
-            if segment_quality_score < per_segment_quality_threshold:
-                low_quality_segment_idx = curr_input_segment_idx
-                curr_input_segment_idx += 1
-                # If the low quality segment is not the first or the last in the entire
-                # audio sample, we will discard the entire slice in case it contains
-                # garbage
-                if low_quality_segment_idx > 0 and low_quality_segment_idx < len(input_segments) - 1:
-                    curr_slice_segments.clear()
-                    next_slice_start = input_segments[low_quality_segment_idx].end
-                    break
-                else:
-                    # in the edge-low-quality cases, continue the normal slicing flow
-                    # as if this segment did not exist
-                    continue
+            # track the source segments used in this slice for quality analysis after slice completion
+            curr_slice_source_segments.append(curr_input_segment)
+            curr_slice_source_segment_idxs.append(curr_input_segment_idx)
 
+            # Add it to the slice
             slice_segment = {
                 "start": max(0, curr_input_segment.start - slice_start),  # relative to slice
             }
@@ -228,6 +226,44 @@ def generate_slices(
 
                 # Break, this slice is done.
                 break
+
+        # Slice Quality Control
+        slice_quality_score = calculate_segments_quality_score(curr_slice_source_segments)
+
+        # Check if the slice quality is below threshold to abandon it and force a new slice
+        if curr_slice_source_segments and slice_quality_score < per_segment_quality_threshold:
+            # This slice is suspected as low quality
+
+            # Look for a segment with good quality to start the next slice
+            # skip the first segment in the slice (otherwise we probably are going
+            # to just repeat the same slice)
+            found_good_segment = False
+            for seg_idx_within_slice, seg_of_slice in enumerate(curr_slice_source_segments):
+                if seg_idx_within_slice == 0:
+                    continue
+
+                segment_score = calculate_segments_quality_score([seg_of_slice])
+
+                if segment_score >= per_segment_quality_threshold:
+                    # Found a good enough segment, start next slice from here
+                    next_slice_start = seg_of_slice.start
+                    curr_input_segment_idx = curr_slice_source_segment_idxs[seg_idx_within_slice]
+                    found_good_segment = True
+                    break
+
+            # If no good segment found, start from the end of the last checked segment
+            if not found_good_segment:
+                next_segment_idx_after_slice_segments = curr_slice_source_segment_idxs[-1] + 1
+                # if any segment ahead
+                if next_segment_idx_after_slice_segments < len(input_segments):
+                    next_slice_start = input_segments[next_segment_idx_after_slice_segments].start
+                    curr_input_segment_idx = next_segment_idx_after_slice_segments
+                # or there are more segments - stop slicing
+                else:
+                    next_slice_start = audio_duration
+
+            # Clear the current slice content as we're abandoning it
+            curr_slice_segments.clear()
 
     return slices
 
