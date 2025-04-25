@@ -33,3 +33,7 @@ amazon-transcribe
 hebrew
 runpod
 stable_ts==2.18.3
+ctranslate2
+optimum[exporters]
+onnx
+onnxruntime

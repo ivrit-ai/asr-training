@@ -63,3 +63,57 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:`python3 -c 'import os; import nvidia.cu
 # Usage Guidance
 
 See [examples](./examples) for how to use the models.
+
+# Model Format Generator
+
+This script allows you to convert ASR models (like Whisper) to various formats including:
+- CT2 (CTranslate2)
+- ONNX
+- GGML
+
+## Installation
+
+```bash
+pip install -r requirements.txt
+```
+
+## Usage
+
+```bash
+python generate_model_format.py -m MODEL_NAME -f FORMAT1,FORMAT2 -o OUTPUT_DIR
+```
+
+### Examples
+
+Convert to all formats:
+```bash
+python generate_model_format.py -m ivrit-ai/whisper-large-v3
+```
+
+Convert to specific formats:
+```bash
+python generate_model_format.py -m ivrit-ai/whisper-large-v3 -f ct2,ggml
+```
+
+Specify output directory and custom quantization for CT2:
+```bash
+python generate_model_format.py -m ivrit-ai/whisper-large-v3 -f ct2,ggml -o my_models -q float32
+```
+
+### Parameters
+
+- `-m, --model`: Model name or path (default: openai/whisper-large-v3)
+- `-o, --output`: Base output directory (default: model-name)
+- `-f, --formats`: Comma-separated list of output formats (default: all, options: ct2,onnx,ggml)
+- `-q, --quant`: Quantization type for CT2 format (default: float16)
+- `-h, --help`: Show help message
+
+## Output Structure
+
+The script creates a directory structure as follows:
+```
+output_dir/
+  ├── ct2/         # CT2 model files
+  ├── onnx/        # ONNX model files
+  └── ggml/        # GGML model files
+```
