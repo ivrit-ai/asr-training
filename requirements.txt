@@ -1,8 +1,9 @@
 audiosample==2.2.6
 # The below version fixes an incompatibility in AudioSample
-# If this is nto fixed soon - ditch AudioSample which is probably
+# If this is not fixed soon - ditch AudioSample which is probably
 # not mature enough for production
 av>=12.3.0,<14
+audiomentations @ git+https://github.com/iver56/audiomentations@14b6a958877236857d59d04b0f9deac3e5feca4e 
 bitsandbytes
 datasets
 faster-whisper

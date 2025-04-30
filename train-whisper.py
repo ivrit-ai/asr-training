@@ -190,6 +190,12 @@ def parse_arguments():
         help="Probability to include previous text with a sample only when prev transcript is present on the sample",
     )
     parser.add_argument(
+        "--degradation_augment_prob",
+        type=float,
+        default=0,
+        help="Probability to use degradation augmentations on the sample (Noise, downsampling, bandpass filter, etc.)",
+    )
+    parser.add_argument(
         "--inject_synthetic_timestamps",
         help="If timestamps are to be included with a sample but not provided, a start+end timestamp token will be injected",
         action="store_true",
@@ -297,6 +303,7 @@ def main():
         proc_num=args.ds_processor_proc_num,
         timestamp_sample_prob=args.include_timestamps_prob,
         condition_on_prev_sample_prob=args.include_prev_text_prob,
+        degradation_augment_prob=args.degradation_augment_prob,
         inject_synthetic_timestamps=args.inject_synthetic_timestamps,
         audio_shift_augmentation=args.audio_shift_augmentation,
     )
@@ -436,7 +443,7 @@ def main():
         # Configure save_only_model
         save_only_model=True if args.save_only_model else None,
 
-        # There is not branching in training the Whisper model
+        # There is no branching in training the Whisper model
         ddp_find_unused_parameters=False,
         # This would take longer, but will calculate the loss
         # with proper averaging across GPUs.

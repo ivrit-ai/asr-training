@@ -13,7 +13,7 @@ from scipy.stats import beta
 from torchaudio.transforms import Resample
 from transformers import BatchFeature, WhisperProcessor
 
-from preprocess.augmentation import shift_audio_forward
+from preprocess.augmentation import shift_audio_forward, AudioAugmenter
 
 # This is defined as part of the model config
 # and should match the loaded model.
@@ -56,6 +56,7 @@ class DatasetPreparator:
         device: str = "cpu",
         seed: np.random.RandomState = None,
         # Experimental
+        degradation_augment_prob=0,
         inject_synthetic_timestamps=False,
         audio_shift_augmentation=False,
     ):
@@ -91,6 +92,11 @@ class DatasetPreparator:
         self.inject_synthetic_timestamps = inject_synthetic_timestamps
         self.audio_shift_augmentation = audio_shift_augmentation
         self.max_shifted_audio_ends_at = 29.6
+        self.degradation_augment_prob = degradation_augment_prob
+        if self.degradation_augment_prob > 0:
+            self.degradation_augmenter = AudioAugmenter.create_preset("degrade", prob=self.degradation_augment_prob)
+        else:
+            self.degradation_augmenter = None
 
         # Prepare the output features - to ensure optimal storage during mapping (uses disk cache for mapped content)
         self.output_features = Features(
@@ -167,6 +173,10 @@ class DatasetPreparator:
         if example_audio_shift_augmentation > 0:
             resampled_audio_array = shift_audio_forward(
                 resampled_audio_array, example_audio_shift_augmentation, target_sampling_rate
+            )
+        elif self.degradation_augmenter:
+            resampled_audio_array = self.degradation_augmenter(
+                resampled_audio_array.astype(np.float32), target_sampling_rate
             )
 
         # We want to use the device kwargs - we call the feature extractor directly
