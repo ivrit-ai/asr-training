@@ -99,20 +99,43 @@ def load_audio_in_whisper_format(file: str, sr: int = WHISPER_EXPECTED_SAMPLE_RA
     return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
 
 
+def get_segment_word_scores(segment: Segment) -> list[float]:
+    """
+    Get the word scores for a segment.
+    This is a helper function to extract the word scores from a segment.
+    """
+    if not segment.has_words:
+        return []
+
+    # Extract word scores from the segment
+    word_scores = []
+    for word in segment.words:
+        if hasattr(word, "probability"):
+            word_scores.append(word.probability)
+    return word_scores
+
+
+def calculate_median_quality_score(scores: list[float]) -> float:
+    """
+    Calculate the median quality score for a list of scores.
+    This is a helper function to calculate the median quality score for a list of scores.
+    """
+    # Calculate the median probability of all words in the segment
+    quality_score = float(np.median(scores)) if scores else 0.0
+    return quality_score
+
+
 def calculate_segments_quality_score(segments: list[Segment]) -> float:
     if not segments:
-        return 0
+        return 0.0
 
     """Calculate the quality score based on the median word probabilities for a single segment."""
     try:
         all_word_probs = []
         for segment in segments:
-            if segment.has_words:
-                for word in segment.words:
-                    if hasattr(word, "probability"):
-                        all_word_probs.append(word.probability)
+            all_word_probs.extend(get_segment_word_scores(segment))
         # Calculate the median probability of all words in the segment
-        quality_score = float(np.median(all_word_probs)) if all_word_probs else 0.0
+        quality_score = calculate_median_quality_score(all_word_probs)
         return quality_score
 
     except Exception:
@@ -188,6 +211,7 @@ def generate_slices(
                 #                     ^
                 slice_segment["end"] = min(slice_length, curr_input_segment_end - slice_start)  # relative to slice
                 slice_segment["text"] = curr_input_segment.text
+                slice_segment["word_scores"] = get_segment_word_scores(curr_input_segment)
 
                 # entire segment is included - no need to reference it again on the next slice.
                 curr_input_segment_idx += 1
@@ -393,6 +417,8 @@ def generate_examples_from_slices(
                     slice_text += get_timestamp_token_text(segment["start"])
                     if "text" in segment:
                         slice_text += f'{segment["text"]}{get_timestamp_token_text(segment["end"])}'
+                all_word_scores = [score for segment in slice["segments"] for score in segment.get("word_scores", [])]
+                segments_quality_score = calculate_median_quality_score(all_word_scores)
                 slice_audio_data = get_slice_audio_data(audio_loader, slice, slice_length)
                 example = {
                     "audio": {
@@ -405,6 +431,7 @@ def generate_examples_from_slices(
                         "duration": slice_length,
                         "source": source_id,
                         "entry_id": source_entry_id,
+                        "quality_score": segments_quality_score,
                     },
                     "has_prev": False,
                     "has_timestamps": True,
@@ -539,6 +566,7 @@ def prepare_training_dataset(
                         "duration": ValueColumnType(dtype="float32"),
                         "source": ValueColumnType(dtype="string"),
                         "entry_id": ValueColumnType(dtype="string"),
+                        "quality_score": ValueColumnType(dtype="float32"),
                     },
                     "has_prev": ValueColumnType(dtype="bool"),
                     "has_timestamps": ValueColumnType(dtype="bool"),

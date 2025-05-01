@@ -13,7 +13,7 @@ test_cases = [
         [
             {
                 "seek": 15,
-                "segments": [{"start": 0, "end": 5, "text": "Hello"}],
+                "segments": [{"start": 0, "end": 5, "text": "Hello", "word_scores": []}],
             }
         ],
         0,
@@ -28,7 +28,7 @@ test_cases = [
         [
             {
                 "seek": 0,
-                "segments": [{"start": 15, "end": 20, "text": "Hello"}],
+                "segments": [{"start": 15, "end": 20, "text": "Hello", "word_scores": []}],
             },
         ],
         0,
@@ -44,11 +44,11 @@ test_cases = [
         [
             {
                 "seek": 0,
-                "segments": [{"start": 15, "end": 20, "text": "Hello"}],
+                "segments": [{"start": 15, "end": 20, "text": "Hello", "word_scores": []}],
             },
             {
                 "seek": 40,
-                "segments": [{"start": 0, "end": 5, "text": "World"}],
+                "segments": [{"start": 0, "end": 5, "text": "World", "word_scores": []}],
             },
         ],
         0,
@@ -63,7 +63,10 @@ test_cases = [
         [
             {
                 "seek": 0,
-                "segments": [{"start": 0, "end": 10, "text": "Hello"}, {"start": 15, "end": 20, "text": "World"}],
+                "segments": [
+                    {"start": 0, "end": 10, "text": "Hello", "word_scores": []},
+                    {"start": 15, "end": 20, "text": "World", "word_scores": []},
+                ],
             }
         ],
         0,
@@ -76,8 +79,8 @@ test_cases = [
         ],
         40,
         [
-            {"seek": 0, "segments": [{"start": 0, "end": 10, "text": "Hello"}, {"start": 15}]},
-            {"seek": 10, "segments": [{"start": 5, "end": 25, "text": "World"}]},
+            {"seek": 0, "segments": [{"start": 0, "end": 10, "text": "Hello", "word_scores": []}, {"start": 15}]},
+            {"seek": 10, "segments": [{"start": 5, "end": 25, "text": "World", "word_scores": []}]},
         ],
         0,
         id="last_segment_cross_over",
@@ -89,9 +92,9 @@ test_cases = [
         ],
         70,
         [
-            {"seek": 0, "segments": [{"start": 0, "end": 10, "text": "Hello"}]},
+            {"seek": 0, "segments": [{"start": 0, "end": 10, "text": "Hello", "word_scores": []}]},
             {"seek": 30, "segments": []},
-            {"seek": 50, "segments": [{"start": 0, "end": 20, "text": "World"}]},
+            {"seek": 50, "segments": [{"start": 0, "end": 20, "text": "World", "word_scores": []}]},
         ],
         0,
         id="last_segment_cross_over_single_crossed_over",
@@ -111,7 +114,7 @@ test_cases = [
         ],
         10,
         [
-            {"seek": 0, "segments": [{"start": 0, "end": 5, "text": "Hello"}]},
+            {"seek": 0, "segments": [{"start": 0, "end": 5, "text": "Hello", "word_scores": []}]},
         ],
         0,
         id="basic_single_segment_in_a_single_slice",
@@ -123,7 +126,7 @@ test_cases = [
         45,
         [
             {"seek": 0, "segments": []},
-            {"seek": 30, "segments": [{"start": 5, "end": 15, "text": "Hello"}]},
+            {"seek": 30, "segments": [{"start": 5, "end": 15, "text": "Hello", "word_scores": []}]},
         ],
         0,
         id="first_slice_empty",
@@ -134,7 +137,7 @@ test_cases = [
         ],
         45,
         [
-            {"seek": 0, "segments": [{"start": 5, "end": 15, "text": "Hello"}]},
+            {"seek": 0, "segments": [{"start": 5, "end": 15, "text": "Hello", "word_scores": []}]},
             {"seek": 30, "segments": []},
         ],
         0,
@@ -160,7 +163,7 @@ test_cases = [
         45,
         [
             {"seek": 0, "segments": []},
-            {"seek": 20, "segments": [{"start": 0, "end": 15, "text": "Hello"}]},
+            {"seek": 20, "segments": [{"start": 0, "end": 15, "text": "Hello", "word_scores": [0.9]}]},
         ],
         0.8,
         id="low_quality_slice_dropped_first_seg_low_quality",
@@ -177,7 +180,7 @@ test_cases = [
         30,
         [
             {"seek": 0, "segments": []},
-            {"seek": 25, "segments": [{"start": 0, "end": 5, "text": "World"}]},
+            {"seek": 25, "segments": [{"start": 0, "end": 5, "text": "World", "word_scores": [0.8]}]},
         ],
         0.8,
         id="low_quality_slice_dropped_mid_seg_low_quality",
@@ -194,7 +197,7 @@ test_cases = [
         35,
         [
             {"seek": 0, "segments": []},
-            {"seek": 25, "segments": [{"start": 0, "end": 10, "text": "World"}]},
+            {"seek": 25, "segments": [{"start": 0, "end": 10, "text": "World", "word_scores": [0.8]}]},
         ],
         0.8,
         id="low_quality_slice_dropped_cross_over_good_quality",
@@ -211,7 +214,7 @@ test_cases = [
         45,
         [
             {"seek": 0, "segments": []},
-            {"seek": 35, "segments": [{"start": 0, "end": 10, "text": "World"}]},
+            {"seek": 35, "segments": [{"start": 0, "end": 10, "text": "World", "word_scores": [0.9]}]},
         ],
         0.8,
         id="low_quality_slice_dropped_no_good_quality_in_slice",
@@ -228,14 +231,19 @@ test_cases = [
         ],
         45,
         [
-            {"seek": 0, "segments": [{"start": 5, "end": 10, "text": "Hello"}, {"start": 20, "end": 30, "text": "World"}]},
+            {
+                "seek": 0,
+                "segments": [
+                    {"start": 5, "end": 10, "text": "Hello", "word_scores": [0.8]},
+                    {"start": 20, "end": 30, "text": "World", "word_scores": [0.9]},
+                ],
+            },
             {"seek": 30, "segments": []},
-            {"seek": 36, "segments": [{"start": 0, "end": 1, "text": "high"}]},
+            {"seek": 36, "segments": [{"start": 0, "end": 1, "text": "high", "word_scores": [0.9]}]},
         ],
         0.8,
         id="low_quality_slice_dropped_not_the_first_slice",
     ),
-    
     pytest.param(
         [
             Segment(words=[WordTiming("Hello", 2, 4, 0.9)]),
@@ -243,11 +251,11 @@ test_cases = [
         ],
         40,
         [
-            {"seek": 0, "segments": [{"start": 2, "end": 4, "text": "Hello"}, {"start": 29}]},
+            {"seek": 0, "segments": [{"start": 2, "end": 4, "text": "Hello", "word_scores": [0.9]}, {"start": 29}]},
             # Segment that crossed over still ends outside the slice, and the only one
             {"seek": 4, "segments": []},
             # so it opens it's own new slice
-            {"seek": 29, "segments": [{"start": 0, "end": 6, "text": "World"}]},
+            {"seek": 29, "segments": [{"start": 0, "end": 6, "text": "World", "word_scores": [0.9]}]},
         ],
         0.5,
         id="twice_crossed_over_push",
@@ -266,7 +274,7 @@ test_cases = [
         ],
         62,
         [
-            {"seek": 0, "segments": [{"start": 2, "end": 4, "text": "Hello"}, {"start": 29}]},
+            {"seek": 0, "segments": [{"start": 2, "end": 4, "text": "Hello", "word_scores": [0.9]}, {"start": 29}]},
             # Segment that crossed over still ends outside the slice and too long for even a single slice
             # so not created
         ],
@@ -280,7 +288,7 @@ test_cases = [
         ],
         60,
         [
-            {"seek": 36, "segments": [{"start": 0, "end": 20, "text": "World"}]},
+            {"seek": 36, "segments": [{"start": 0, "end": 20, "text": "World", "word_scores": [0.9]}]},
             # Segment that crossed over still ends outside the slice and too long for even a single slice
             # so not created
         ],
@@ -294,8 +302,8 @@ test_cases = [
         ],
         15,  # Audio duration shorter than slice_length (30)
         [
-            {"seek": 0, "segments": [{"start": 5, "end": 10, "text": "Hello"}]},
-        ], 
+            {"seek": 0, "segments": [{"start": 5, "end": 10, "text": "Hello", "word_scores": []}]},
+        ],
         0,
         id="audio_duration_shorter_than_slice_length",
     ),
@@ -308,6 +316,22 @@ test_cases = [
         [],  # Expect empty slices list
         0,
         id="zero_audio_duration",
+    ),
+    pytest.param(
+        [
+            Segment(words=[WordTiming("Hello", 2, 4, 0.9), WordTiming(" Again", 5, 8, 0.8)]),
+            Segment(words=[WordTiming("Dear", 31, 35, 0.7), WordTiming(" World", 36, 38, 0.6)]),
+        ],
+        40,
+        [
+            {
+                "seek": 0,
+                "segments": [{"start": 2, "end": 8, "text": "Hello Again", "word_scores": [0.9, 0.8]}],
+            },
+            {"seek": 30, "segments": [{"start": 1, "end": 8, "text": "Dear World", "word_scores": [0.7, 0.6]}]},
+        ],
+        0.5,
+        id="gathers_all_word_scores_of_segments",
     ),
 ]
 
@@ -342,3 +366,6 @@ def test_generate_slices(input_segments, audio_duration, expected_slices, per_se
                     assert result_seg["end"] == expected_seg["end"], f"Segment {seg_idx} end mismatch"
                 if "text" in expected_seg:
                     assert result_seg["text"] == expected_seg["text"], f"Segment {seg_idx} text mismatch"
+                    assert (
+                        result_seg["word_scores"] == expected_seg["word_scores"]
+                    ), f"Segment {seg_idx} word scores mismatch"
