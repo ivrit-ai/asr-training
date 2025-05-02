@@ -223,6 +223,10 @@ def generate_slices(
             else:
                 # This slice ends - close this slice
 
+                # remove the last added source segment - it was not used
+                curr_slice_source_segments = curr_slice_source_segments[:-1]
+                curr_slice_source_segment_idxs = curr_slice_source_segment_idxs[:-1]
+
                 # Special case - If the "start only" segment is the only one - don't include it at all.
                 # Instead, this slice would be left empty.
                 if len(curr_slice_segments) == 1:
@@ -231,6 +235,7 @@ def generate_slices(
                     # |_________________________||........
                     #                                ^
                     curr_slice_segments.clear()
+                    
                     # In this special case, the current segment starts within
                     # the slice and ends outside of it. But it is the only segment.
                     # We need to start the next slice on the **start** of this segment
@@ -247,6 +252,7 @@ def generate_slices(
                     # and ends outside of it and other segments within this slice were closed normally.
                     # We need to start the next slice on the **end** of prev segment before the "start-only" one.
                     next_slice_start = input_segments[curr_input_segment_idx - 1].end
+
 
                 # Break, this slice is done.
                 break

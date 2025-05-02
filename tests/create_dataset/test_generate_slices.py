@@ -146,7 +146,7 @@ test_cases = [
     pytest.param(
         [
             Segment(words=[WordTiming("Hello", 5, 15, 0.9)]),
-            Segment(words=[WordTiming("low", 20, 35, 0.1)]),
+            Segment(words=[WordTiming("low", 20, 29, 0.1)]),
         ],
         45,
         [
@@ -165,7 +165,9 @@ test_cases = [
             {"seek": 0, "segments": []},
             {"seek": 20, "segments": [{"start": 0, "end": 15, "text": "Hello", "word_scores": [0.9]}]},
         ],
-        0.8,
+        # 0.4 is to high for the first seg alone.
+        # Since the second seg is crossed over, we shouldn't include it in the scoring
+        0.4,
         id="low_quality_slice_dropped_first_seg_low_quality",
     ),
     pytest.param(
@@ -188,18 +190,22 @@ test_cases = [
     pytest.param(
         [
             Segment(words=[WordTiming("Hello", 5, 10, 0.8)]),
-            Segment(words=[WordTiming("low", 15, 20, 0.1)]),
-            Segment(words=[WordTiming("low", 20, 21, 0.1)]),
-            Segment(words=[WordTiming("low", 21, 22, 0.1)]),
-            Segment(words=[WordTiming("low", 22, 23, 0.1)]),
+            Segment(words=[WordTiming("low", 15, 20, 0.7)]),
+            Segment(words=[WordTiming("low", 20, 21, 0.7)]),
+            Segment(words=[WordTiming("low", 21, 22, 0.6)]),
+            Segment(words=[WordTiming("low", 22, 23, 0.6)]),
+            Segment(words=[WordTiming("low", 23, 23, 0.6)]),
             Segment(words=[WordTiming("World", 25, 35, 0.8)]),
         ],
         35,
         [
-            {"seek": 0, "segments": []},
+            {"seek": 0, "segments": []}, # attempt one with 0.8
+            {"seek": 15, "segments": []}, # attempt two with 0.7
+            {"seek": 20, "segments": []}, # attempt three with 0.7
+            # skipped other segments since below threshold
             {"seek": 25, "segments": [{"start": 0, "end": 10, "text": "World", "word_scores": [0.8]}]},
         ],
-        0.8,
+        0.7,
         id="low_quality_slice_dropped_cross_over_good_quality",
     ),
     pytest.param(
@@ -243,6 +249,24 @@ test_cases = [
         ],
         0.8,
         id="low_quality_slice_dropped_not_the_first_slice",
+    ),
+    pytest.param(
+        [
+            # This median score is 0.7
+            Segment(words=[WordTiming("a", 2, 4, 0.8), WordTiming(" b", 5, 7, 0.7), WordTiming(" c", 8, 10, 0.6)]),
+            # but with this segment it becomes 0.6
+            Segment(words=[WordTiming("d", 29, 31, 0.5), WordTiming(" e", 32, 34, 0.4)]),
+        ],
+        40,
+        [
+            {
+                "seek": 0,
+                "segments": [{"start": 2, "end": 10, "text": "a b c", "word_scores": [0.8, 0.7, 0.6]}, {"start": 29}],
+            },
+            {"seek": 10, "segments": []},
+        ],
+        0.7,
+        id="quality_score_filter_does_not_include_crossed_over_segments",
     ),
     pytest.param(
         [
