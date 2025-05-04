@@ -7,8 +7,16 @@ import uuid
 
 from tqdm import tqdm
 from stable_whisper.result import WhisperResult, Segment
+from stable_whisper.audio import AudioLoader
 from audiosample import AudioSample
-from datasets import Dataset, DatasetDict, concatenate_datasets, Audio as AudioColumnType
+from datasets import (
+    Dataset,
+    DatasetDict,
+    concatenate_datasets,
+    Audio as AudioColumnType,
+    Value as ValueColumnType,
+    Features,
+)
 from huggingface_hub import DatasetCard, DatasetCardData, upload_file
 
 
@@ -91,29 +99,43 @@ def load_audio_in_whisper_format(file: str, sr: int = WHISPER_EXPECTED_SAMPLE_RA
     return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
 
 
-def create_captions_from_segments(segments_data: WhisperResult):
-    captions = []
-    for segment in segments_data.segments:
-        captions.append(
-            {
-                "start": segment.start,
-                "end": segment.end,
-                "text": segment.text,
-            }
-        )
-    return captions
+def get_segment_word_scores(segment: Segment) -> list[float]:
+    """
+    Get the word scores for a segment.
+    This is a helper function to extract the word scores from a segment.
+    """
+    if not segment.has_words:
+        return []
+
+    # Extract word scores from the segment
+    word_scores = []
+    for word in segment.words:
+        if hasattr(word, "probability"):
+            word_scores.append(word.probability)
+    return word_scores
 
 
-def calculate_segment_quality_score(segment: Segment) -> float:
+def calculate_median_quality_score(scores: list[float]) -> float:
+    """
+    Calculate the median quality score for a list of scores.
+    This is a helper function to calculate the median quality score for a list of scores.
+    """
+    # Calculate the median probability of all words in the segment
+    quality_score = float(np.median(scores)) if scores else 0.0
+    return quality_score
+
+
+def calculate_segments_quality_score(segments: list[Segment]) -> float:
+    if not segments:
+        return 0.0
+
     """Calculate the quality score based on the median word probabilities for a single segment."""
     try:
-        word_probs = []
-        if segment.has_words:
-            for word in segment.words:
-                if hasattr(word, "probability"):
-                    word_probs.append(word.probability)
-
-        quality_score = float(np.median(word_probs)) if word_probs else 0.0
+        all_word_probs = []
+        for segment in segments:
+            all_word_probs.extend(get_segment_word_scores(segment))
+        # Calculate the median probability of all words in the segment
+        quality_score = calculate_median_quality_score(all_word_probs)
         return quality_score
 
     except Exception:
@@ -132,34 +154,43 @@ def generate_slices(
     while next_slice_start < audio_duration:
         slice_start = next_slice_start
 
+        # Ensure current segment exists
+        # and validate it's duration.
+        if curr_input_segment_idx < len(input_segments):
+            curr_input_segment_duration = (
+                input_segments[curr_input_segment_idx].end - input_segments[curr_input_segment_idx].start
+            )
+            # If the first segment to work on is too long for a single slice or of 0 length we must skip it.
+            if curr_input_segment_duration > slice_length or curr_input_segment_duration == 0:
+                # skip if any segment ahead
+                if curr_input_segment_idx + 1 < len(input_segments):
+                    next_slice_start = input_segments[curr_input_segment_idx + 1].start
+                    curr_input_segment_idx += 1
+                # or break since nothing more to work on
+                else:
+                    next_slice_start = audio_duration
+
+                continue
+
+        curr_slice_source_segment_idxs = []
+        curr_slice_source_segments = []
         curr_slice_segments = []
         curr_slice = {"segments": curr_slice_segments, "seek": slice_start}
         slices.append(curr_slice)
         # normal slice length is the expected slice hop - but this could be overridden below. See comments.
         next_slice_start = slice_start + slice_length
-        # clip the slice end to the audio duration
+        # clip the slice end to the total audio duration
         slice_end = min(next_slice_start, audio_duration)
+
+        # While more segments to work on and the current segment start is within the slice
         while curr_input_segment_idx < len(input_segments) and input_segments[curr_input_segment_idx].start < slice_end:
             curr_input_segment = input_segments[curr_input_segment_idx]
-            segment_quality_score = calculate_segment_quality_score(curr_input_segment)
 
-            # Low quality segments are ignored
-            # We assume they represent text which is not in the audio.
-            if segment_quality_score < per_segment_quality_threshold:
-                low_quality_segment_idx = curr_input_segment_idx
-                curr_input_segment_idx += 1
-                # If the low quality segment is not the first or the last in the entire
-                # audio sample, we will discard the entire slice in case it contains
-                # garbage
-                if low_quality_segment_idx > 0 and low_quality_segment_idx < len(input_segments) - 1:
-                    curr_slice_segments.clear()
-                    next_slice_start = input_segments[low_quality_segment_idx].end
-                    break
-                else:
-                    # in the edge-low-quality cases, continue the normal slicing flow
-                    # as if this segment did not exist
-                    continue
+            # track the source segments used in this slice for quality analysis after slice completion
+            curr_slice_source_segments.append(curr_input_segment)
+            curr_slice_source_segment_idxs.append(curr_input_segment_idx)
 
+            # Add it to the slice
             slice_segment = {
                 "start": max(0, curr_input_segment.start - slice_start),  # relative to slice
             }
@@ -180,6 +211,7 @@ def generate_slices(
                 #                     ^
                 slice_segment["end"] = min(slice_length, curr_input_segment_end - slice_start)  # relative to slice
                 slice_segment["text"] = curr_input_segment.text
+                slice_segment["word_scores"] = get_segment_word_scores(curr_input_segment)
 
                 # entire segment is included - no need to reference it again on the next slice.
                 curr_input_segment_idx += 1
@@ -191,6 +223,10 @@ def generate_slices(
             else:
                 # This slice ends - close this slice
 
+                # remove the last added source segment - it was not used
+                curr_slice_source_segments = curr_slice_source_segments[:-1]
+                curr_slice_source_segment_idxs = curr_slice_source_segment_idxs[:-1]
+
                 # Special case - If the "start only" segment is the only one - don't include it at all.
                 # Instead, this slice would be left empty.
                 if len(curr_slice_segments) == 1:
@@ -199,6 +235,7 @@ def generate_slices(
                     # |_________________________||........
                     #                                ^
                     curr_slice_segments.clear()
+                    
                     # In this special case, the current segment starts within
                     # the slice and ends outside of it. But it is the only segment.
                     # We need to start the next slice on the **start** of this segment
@@ -216,16 +253,133 @@ def generate_slices(
                     # We need to start the next slice on the **end** of prev segment before the "start-only" one.
                     next_slice_start = input_segments[curr_input_segment_idx - 1].end
 
+
                 # Break, this slice is done.
                 break
+
+        # Slice Quality Control
+        slice_quality_score = calculate_segments_quality_score(curr_slice_source_segments)
+
+        # Check if the slice quality is below threshold to abandon it and force a new slice
+        if curr_slice_source_segments and slice_quality_score < per_segment_quality_threshold:
+            # This slice is suspected as low quality
+
+            # Look for a segment with good quality to start the next slice
+            # skip the first segment in the slice (otherwise we probably are going
+            # to just repeat the same slice)
+            found_good_segment = False
+            for seg_idx_within_slice, seg_of_slice in enumerate(curr_slice_source_segments):
+                if seg_idx_within_slice == 0:
+                    continue
+
+                segment_score = calculate_segments_quality_score([seg_of_slice])
+
+                if segment_score >= per_segment_quality_threshold:
+                    # Found a good enough segment, start next slice from here
+                    next_slice_start = seg_of_slice.start
+                    curr_input_segment_idx = curr_slice_source_segment_idxs[seg_idx_within_slice]
+                    found_good_segment = True
+                    break
+
+            # If no good segment found, start from the end of the last checked segment
+            if not found_good_segment:
+                next_segment_idx_after_slice_segments = curr_slice_source_segment_idxs[-1] + 1
+                # if any segment ahead
+                if next_segment_idx_after_slice_segments < len(input_segments):
+                    next_slice_start = input_segments[next_segment_idx_after_slice_segments].start
+                    curr_input_segment_idx = next_segment_idx_after_slice_segments
+                # or there are more segments - stop slicing
+                else:
+                    next_slice_start = audio_duration
+
+            # Clear the current slice content as we're abandoning it
+            curr_slice_segments.clear()
 
     return slices
 
 
-def get_slice_audio_data(audio_data, slice, slice_length):
+def merge_slice_segments(slices: list[dict], merge_below_gap_threshold: float = 0.3) -> list[dict]:
+    """
+    Merge segments within each slice that are close together.
+
+    Args:
+        slices: List of slices, each containing a list of segments
+        merge_below_gap_threshold: Merge segments if gap between them is less than this threshold (in seconds)
+
+    Returns:
+        List of slices with merged segments
+    """
+    if not slices:
+        return slices
+
+    result_slices = []
+
+    for slice_data in slices:
+        # Create a new slice with the same properties as the original, but copy it to avoid modifying the original
+        new_slice = {key: value for key, value in slice_data.items() if key != "segments"}
+        new_slice["segments"] = []
+
+        segments = slice_data.get("segments", [])
+
+        # If no segments or only one segment, no merging needed
+        if len(segments) <= 1:
+            new_slice["segments"] = [segment.copy() for segment in segments]
+            result_slices.append(new_slice)
+            continue
+
+        # Create a copy of segments to process
+        result_segments = [segment.copy() for segment in segments]
+
+        # Process segments in reverse order
+        i = len(result_segments) - 1
+        while i > 0:  # Stop at index 1 (second segment)
+            current_segment = result_segments[i]
+            prev_segment = result_segments[i - 1]
+
+            # Check if we can merge the current segment with the previous one
+            can_merge = False
+
+            # Current segment must have start, end, and text to be mergeable
+            # Note: No "end" cases means an open-only slice where the last segment
+            # mark a segment which could not end within the same slice. we need
+            # to keep it as is.
+            if all(key in current_segment for key in ["start", "end", "text"]):
+
+                # Calculate the gap between segments
+                gap = current_segment["start"] - prev_segment["end"]
+
+                # Check if the gap is small enough
+                if gap < merge_below_gap_threshold:
+                    can_merge = True
+
+            if can_merge:
+                # Merge current segment into previous segment
+                prev_segment["end"] = current_segment["end"]
+                prev_segment["text"] = prev_segment["text"] + current_segment["text"]
+
+                # Remove the current segment as it's now merged
+                result_segments.pop(i)
+
+            # Move to previous segment
+            i -= 1
+
+        # Add all processed segments to the new slice
+        new_slice["segments"] = result_segments
+        result_slices.append(new_slice)
+
+    return result_slices
+
+
+def get_slice_audio_data(audio_loader: AudioLoader, slice, slice_length):
     audio_start_sec = slice["seek"]
-    audio_end_sec = audio_start_sec + slice_length
-    return audio_data[audio_start_sec:audio_end_sec]
+    seek_sample = int(audio_start_sec * WHISPER_EXPECTED_SAMPLE_RATE)
+    slice_length_samples = int(slice_length * WHISPER_EXPECTED_SAMPLE_RATE)
+    audio_data = audio_loader.next_chunk(seek_sample, slice_length_samples)
+    slice_audio_data_as_mp3 = AudioSample(
+        audio_data.numpy(), force_read_format="s16le", force_read_sample_rate=WHISPER_EXPECTED_SAMPLE_RATE
+    ).as_data(no_encode=False, force_out_format="mp3")
+
+    return slice_audio_data_as_mp3
 
 
 def get_timestamp_token_text(seconds: float) -> str:
@@ -243,17 +397,21 @@ def get_timestamp_token_text(seconds: float) -> str:
         raise ValueError("Timestamp token out of range.")
 
 
-def generate_examples_from_slices(slices, slice_length, audio_data, metadata: dict) -> Iterator[dict]:
+def generate_examples_from_slices(
+    slices, slice_length, audio_loader, metadata: dict, copy_metadata_fields: list[str] = []
+) -> Iterator[dict]:
     source_id = metadata.get("source_id", "unknown")
     source_entry_id = metadata.get("source_entry_id", str(uuid.uuid4()))
     logger.debug(f"Generating dataset from {source_id}/{source_entry_id}")
 
     # No slices - nothing to do
     if not slices:
+        logger.debug(f"No slices in {source_id}/{source_entry_id}")
         return None
 
     # At least one segments we can work on is expected
     if next(iter([seg for s in slices for seg in s["segments"]]), None) is None:
+        logger.debug(f"No segments in {source_id}/{source_entry_id}")
         return None
 
     prev_example = None
@@ -265,17 +423,21 @@ def generate_examples_from_slices(slices, slice_length, audio_data, metadata: di
                     slice_text += get_timestamp_token_text(segment["start"])
                     if "text" in segment:
                         slice_text += f'{segment["text"]}{get_timestamp_token_text(segment["end"])}'
-                slice_audio_data = get_slice_audio_data(audio_data, slice, slice_length)
+                all_word_scores = [score for segment in slice["segments"] for score in segment.get("word_scores", [])]
+                segments_quality_score = calculate_median_quality_score(all_word_scores)
+                slice_audio_data = get_slice_audio_data(audio_loader, slice, slice_length)
                 example = {
                     "audio": {
-                        "bytes": slice_audio_data.as_data(no_encode=False, force_out_format="mp3"),
+                        "bytes": slice_audio_data,
                         "path": source_entry_id,
                     },
                     "transcript": slice_text,
                     "metadata": {
                         "seek": float(slice["seek"]),
+                        "duration": slice_length,
                         "source": source_id,
                         "entry_id": source_entry_id,
+                        "quality_score": segments_quality_score,
                     },
                     "has_prev": False,
                     "has_timestamps": True,
@@ -284,6 +446,9 @@ def generate_examples_from_slices(slices, slice_length, audio_data, metadata: di
                 if prev_example:
                     example["prev_transcript"] = prev_example["transcript"]
                     example["has_prev"] = True
+                if copy_metadata_fields:
+                    for field_to_copy in copy_metadata_fields:
+                        example["metadata"][field_to_copy] = metadata.get(field_to_copy, None)
                 yield example
                 prev_example = example
             except Exception as e:
@@ -292,6 +457,8 @@ def generate_examples_from_slices(slices, slice_length, audio_data, metadata: di
                 )
         else:
             prev_example = None
+
+    logger.debug(f"Done with samples from {source_id}/{source_entry_id}")
 
 
 def prepare_training_dataset(
@@ -305,6 +472,7 @@ def prepare_training_dataset(
     per_proc_per_chunk_size: int = 10,
     per_sample_quality_threshold: float = 0,
     per_segment_quality_threshold: float = 0,
+    copy_metadata_fields: list[str] = [],
 ) -> Dataset:
     """
     Prepare captioned datasets from the input folder.
@@ -326,7 +494,7 @@ def prepare_training_dataset(
     if max_source_entries:
         input_manifest = input_manifest[:max_source_entries]
 
-    # Aim for 10 entries per worker within each chunk
+    # Aim for reasonable entries per worker within each chunk
     manifest_processing_chunk_size = num_proc * per_proc_per_chunk_size
 
     def examples_from_entry_generator(input_manifest_shards):
@@ -352,24 +520,31 @@ def prepare_training_dataset(
                     )
                     continue
 
-                # Load Audio
-                with AudioSample(
-                    load_audio_in_whisper_format(audio_file, sr=WHISPER_EXPECTED_SAMPLE_RATE),
-                    force_read_sample_rate=WHISPER_EXPECTED_SAMPLE_RATE,
-                ) as audio_data:
-                    audio_duration = audio_data.duration
+                # Load Audio (streams output from an FFMPEG process for memory efficiency)
+                audio_loader = AudioLoader(
+                    str(audio_file),
+                    stream=True,
+                    sr=WHISPER_EXPECTED_SAMPLE_RATE,
+                    buffer_size=int(3 * slice_length * WHISPER_EXPECTED_SAMPLE_RATE),
+                )
+                try:
+                    audio_duration = audio_loader.get_duration()
 
                     # Create slices of the captions with the intended slice
                     slices = generate_slices(segments, audio_duration, slice_length, per_segment_quality_threshold)
+                    slices = merge_slice_segments(slices)
 
                     # Generate the dataset
                     for example in generate_examples_from_slices(
                         slices,
                         slice_length,
-                        audio_data,
+                        audio_loader,
                         metadata,
+                        copy_metadata_fields,
                     ):
                         yield example
+                finally:
+                    audio_loader.terminate()
             except Exception as e:
                 logger.error(f"Error processing {audio_file}: {e}")
 
@@ -387,13 +562,43 @@ def prepare_training_dataset(
     # maintaining parallel generation within each chunk.
     all_datasets = []
     for input_manifest_chunk in tqdm(input_manifest_chunks, desc="Generating input manifest chunks"):
-        all_datasets.append(
-            Dataset.from_generator(
+        try:
+            dataset_features = Features(
+                {
+                    "audio": AudioColumnType(),
+                    "transcript": ValueColumnType(dtype="string"),
+                    "metadata": {
+                        "seek": ValueColumnType(dtype="float32"),
+                        "duration": ValueColumnType(dtype="float32"),
+                        "source": ValueColumnType(dtype="string"),
+                        "entry_id": ValueColumnType(dtype="string"),
+                        "quality_score": ValueColumnType(dtype="float32"),
+                    },
+                    "has_prev": ValueColumnType(dtype="bool"),
+                    "has_timestamps": ValueColumnType(dtype="bool"),
+                    "prev_transcript": ValueColumnType(dtype="string"),
+                }
+            )
+            if copy_metadata_fields:
+                for field_to_copy in copy_metadata_fields:
+                    dataset_features["metadata"][field_to_copy] = ValueColumnType(dtype="string")
+            generated_dataset = Dataset.from_generator(
                 examples_from_entry_generator,
                 num_proc=num_proc,
                 gen_kwargs={"input_manifest_shards": list(input_manifest_chunk)},
+                features=dataset_features,
             )
-        )
+        except ValueError as e:
+            if "corresponds to no data" in str(e):
+                print("Skipping dataset creation because no data was found.")
+                continue
+            else:
+                raise  # Re-raise unexpected errors
+
+        all_datasets.append(generated_dataset)
+
+    if not all_datasets:
+        return None
 
     examples_dataset = concatenate_datasets(all_datasets)
     examples_dataset = examples_dataset.cast_column(
@@ -444,6 +649,12 @@ if __name__ == "__main__":
         default=0,
         help="Quality threshold for per-segment quality filtering (0-1 below this threshold a segment and it's surrounding slice are dropped)",
     )
+    parser.add_argument(
+        "--copy_metadata_fields",
+        nargs="*",
+        default=[],
+        help="specify dataset specific metadata fields to copy into output segments from souce entries",
+    )
     parser.add_argument("--push_to_hub", action="store_true", help="Push the dataset to the hub")
     parser.add_argument(
         "--output_dataset_name", type=str, help="Name of the dataset, Omit to not store any dataset (dry-run)"
@@ -478,8 +689,16 @@ if __name__ == "__main__":
         action="store_true",
         help="Clear the HF cache for the output dataset on disk",
     )
+    parser.add_argument("--log_level", type=str, default="INFO", help="Log level of the general logger.")
 
     args = parser.parse_args()
+
+    # Configure Logger
+    numeric_level = getattr(logging, args.log_level.upper(), None)
+    if not isinstance(numeric_level, int):
+        raise ValueError("Invalid log level: %s" % args.log_level)
+    else:
+        logger.setLevel(level=numeric_level)
 
     # Prepare the dataset
     output_dataset = prepare_training_dataset(
@@ -491,6 +710,7 @@ if __name__ == "__main__":
         per_proc_per_chunk_size=args.per_proc_per_chunk_size,
         per_sample_quality_threshold=args.per_sample_quality_threshold,
         per_segment_quality_threshold=args.per_segment_quality_threshold,
+        copy_metadata_fields=args.copy_metadata_fields,
     )
 
     if output_dataset:

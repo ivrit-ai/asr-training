@@ -9,6 +9,7 @@ from datasets import (
     Value,
     concatenate_datasets,
 )
+from scipy.stats import beta
 from torchaudio.transforms import Resample
 from transformers import BatchFeature, WhisperProcessor
 
@@ -200,7 +201,7 @@ class DatasetPreparator:
         result_example["pad_amount"] = pad_amount
         result_example["input_length"] = len(resampled_audio_array) / target_sampling_rate
 
-    def _prepare_example_text(self, example, ancillary_features, result_example) -> None:
+    def _prepare_example_text(self, example, ancillary_features, result_example, relative_sampling_ratios) -> None:
         text = example["transcript"]
         has_timestamps = example["has_timestamps"] if "has_timestamps" in example else False
         has_prev = example["has_prev"] if "has_prev" in example else False
@@ -218,11 +219,16 @@ class DatasetPreparator:
         )
         token_ids = tokenizer_result["input_ids"]
 
-        # for token_ids, has_timestamps, prev_text, has_prev, shift_augmentation in zip(
-        #     token_ids_batch, has_timestamps_batch, prev_text_batch, has_prev_batch, example_shift_augmentation_batch
-        # ):
-        should_train_on_timestamps = bool(self.seed.binomial(1, self.timestamp_sample_prob))
-        should_condition_on_prev = has_prev and bool(self.seed.binomial(1, self.condition_on_prev_sample_prob))
+        # Should we use and how we sample attributes
+        if relative_sampling_ratios is None:
+            use_timestamps_sampling_prob = self.timestamp_sample_prob
+            use_prev_sampling_prob = self.condition_on_prev_sample_prob
+        else:
+            use_timestamps_sampling_prob = relative_sampling_ratios["has_timestamps"]
+            use_prev_sampling_prob = relative_sampling_ratios["has_prev"]
+
+        should_train_on_timestamps = bool(self.seed.binomial(1, use_timestamps_sampling_prob))
+        should_condition_on_prev = has_prev and bool(self.seed.binomial(1, use_prev_sampling_prob))
 
         if has_timestamps and not should_train_on_timestamps:
             # Remove all timestamp tokens
@@ -264,6 +270,8 @@ class DatasetPreparator:
         # Know this - prev text labels should include timestamps if the transcription labels do.
         # Since we are unable to inject timestamps into prev text, we cannot accomplish the injection
         # in those cases. Hence, the below check of "prev_ids"
+        # TODO - When this feature is used - sampling probs are skewed since we "add" timestamp attributes on the fly.
+        # this is a bug, and not compatible with the sampling ratios atm.
         if should_train_on_timestamps and not has_timestamps and not prev_ids and self.inject_synthetic_timestamps:
             # Injected timestamps may be "shift forward" augmented.
             # Audio features would have been augmented accordingly.
@@ -284,7 +292,7 @@ class DatasetPreparator:
 
         result_example["labels"] = labels_input_ids
 
-    def _prepare_example_fn(self, input_example):
+    def _prepare_example_fn(self, input_example, relative_sampling_ratios=None):
         try:
             # A container for the output features
             result_example = BatchFeature({})
@@ -297,12 +305,92 @@ class DatasetPreparator:
                 input_example,
                 ancillary_features,
                 result_example,
+                relative_sampling_ratios,
             )
 
             return result_example
         except Exception as e:
             print(f"Exception: {e}")
             return None
+
+    def estimate_attribute_ratios(
+        self,
+        dataset,
+        discriminators: dict[str, callable],
+        target_sampling_error_range: float = 0.05,
+        target_sampling_error_confidence: float = 0.95,
+        max_to_sample: int = 4000,
+    ):
+        """Estimate the ratio of positive samples for attributes in the dataset.
+        This function uses a beta distribution to calculate the confidence interval for the estimated ratio.
+        The function will stop sampling when either the confidence interval is within the target range or
+        the maximum number of samples has been reached.
+
+        Args:
+            dataset (Dataset): The input dataset to sample from.
+            discriminators (dict[str, callable]): A dictionary where keys are attribute names and values are functions
+                that take a sample and return True if the attribute is present, False otherwise.
+            target_sampling_error_range (float): The target range for the sampling error.
+            0.05 means 5% error. (2.5% on each side)
+            target_sampling_error_confidence (float): The target confidence level for the sampling error.
+                0.95 means 95% confidence.
+            max_to_sample (int): The maximum number of samples to draw from the dataset.
+
+        Returns:
+            estimation (dict[str, dict[float, float, int]]): A dictionary where keys are attribute names and values are dictionaries
+                containing the estimated ratio, confidence interval, and number of samples.
+        """
+        attr_states = {
+            name: {
+                "total_sampled": 0,
+                "total_positive": 0,
+                "done": False,
+                "conf_interval": (0.0, 1.0),
+            }
+            for name in discriminators
+        }
+
+        for sample in dataset.to_iterable_dataset():
+            all_done = True
+
+            for attr, disc_fn in discriminators.items():
+                state = attr_states[attr]
+
+                positive = bool(disc_fn(sample))
+                state["total_sampled"] += 1
+                if positive:
+                    state["total_positive"] += 1
+
+                total = state["total_sampled"]
+                pos = state["total_positive"]
+
+                a, b = 1 + pos, 1 + (total - pos)
+                conf_int = beta.interval(target_sampling_error_confidence, a, b)
+                state["conf_interval"] = conf_int
+
+                # Only mark as done if not already, and if either condition is met
+                if not state["done"]:
+                    if conf_int[1] - conf_int[0] < target_sampling_error_range:
+                        state["done"] = True
+                    elif total >= max_to_sample:
+                        state["done"] = True
+
+                if not state["done"]:
+                    all_done = False
+
+            if all_done:
+                break
+
+        results = {
+            attr: {
+                "estimated_ratio": state["total_positive"] / state["total_sampled"],
+                "confidence_interval": state["conf_interval"],
+                "samples": state["total_sampled"],
+            }
+            for attr, state in attr_states.items()
+        }
+
+        return results
 
     def prepare_dataset(self, dataset: Dataset):
         dataset = dataset.cast_column("audio", Audio(sampling_rate=self.target_sampling_rate))
@@ -315,8 +403,43 @@ class DatasetPreparator:
             any_split_name = next(iter(columns_to_remove.keys()))
             columns_to_remove = dataset[any_split_name].column_names
 
+        # If we need to sub-sample some of the attributes of the dataset
+        # we will first estimate the ratios of the attributes in the dataset
+        # and then sample the dataset to match the ratios
+        relative_sampling_ratios = None
+        if self.timestamp_sample_prob < 1.0 or self.condition_on_prev_sample_prob < 1.0:
+            print(f"Estimating attribute frequencies for relative sub-sampling.")
+
+            # Estimate the ratios of the attributes in the dataset
+            estimations = self.estimate_attribute_ratios(
+                dataset,
+                {
+                    "has_timestamps": lambda example: "has_timestamps" in example and example["has_timestamps"],
+                    "has_prev": lambda example: "has_prev" in example and example["has_prev"],
+                },
+                target_sampling_error_range=0.05,
+                target_sampling_error_confidence=0.95,
+                max_to_sample=4000,
+            )
+
+            relative_sampling_ratios = {
+                attr: (
+                    min(1.0, self.timestamp_sample_prob / attr_estimation["estimated_ratio"])
+                    if attr_estimation["estimated_ratio"] > 0
+                    else 1.0
+                )
+                for attr, attr_estimation in estimations.items()
+            }
+
+            estimated_ratios = {attr: est["estimated_ratio"] for attr, est in estimations.items()}
+            print(f"Estimated attribute frequencies: {estimated_ratios}")
+            print(f"Relative sampling ratios: {relative_sampling_ratios}")
+
         processed_dataset = dataset.map(
             self._prepare_example_fn,
+            fn_kwargs={
+                "relative_sampling_ratios": relative_sampling_ratios,
+            },
             remove_columns=columns_to_remove,
             num_proc=self.proc_num,
             features=self.output_features,
