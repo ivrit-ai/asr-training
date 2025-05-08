@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Union
 
 import evaluate
 import torch
-from datasets import DatasetDict, interleave_datasets, load_dataset, load_from_disk
+from datasets import DatasetDict, interleave_datasets, load_dataset, load_from_disk, ReadInstruction
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from transformers import (
     BatchFeature,
@@ -41,7 +41,39 @@ def load_datasets(dataset_specs):
         dataset_name = parts[0]
         split = parts[1] if len(parts) == 2 else "train"
 
-        dataset = load_dataset(dataset_name, split=split)
+        
+        try:
+            dataset = load_dataset(dataset_name, split=split)
+        
+        # Local datasets, could suffer from a bug where there are more ".json" files
+        # than ".arrow" files which leads to a mis-detection of the dataset format.
+        # The "load_from_disk" API can get around this problem since it's designed to load
+        # such locally stored dataset generated using "save_to_disk"
+        except ValueError:
+            dataset = load_from_disk(dataset_name)
+            
+            # But, we want to support the flexible "split instruction" syntax like load_dataset provides.
+            # Hf made this extremely hard, by hiding the parsing and results inside a wrapped internal class.
+            # Why? why HF ?!
+            read_instruction = ReadInstruction.from_spec(split)
+            actual_ri_data = read_instruction._relative_instructions[0]
+            slice_units = actual_ri_data.unit
+            # We won't go that crazy - only support "abs" units (not pct syntax)
+            if slice_units != 'abs':
+                # This is such shame - HF please fix this.
+                raise ValueError(f'Unable to support the split definition: ${split} - please read the code for more details.')
+            
+            split_name = actual_ri_data.splitname
+            from_entry = actual_ri_data.from_
+            to_entry = actual_ri_data.to
+            dataset = dataset[split_name]
+            if from_entry is not None:
+                dataset = dataset.skip(from_entry)
+            else:
+                from_entry = 0
+            if to_entry is not None:
+                dataset = dataset.take(to_entry - from_entry)
+
         datasets.append(dataset)
     return datasets
 
@@ -435,7 +467,6 @@ def main():
         save_total_limit=args.max_checkpoints_to_keep,
         # Configure save_only_model
         save_only_model=True if args.save_only_model else None,
-
         # There is not branching in training the Whisper model
         ddp_find_unused_parameters=False,
         # This would take longer, but will calculate the loss
