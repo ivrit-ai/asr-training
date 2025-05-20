@@ -63,6 +63,7 @@ def main():
     # Define dataset configurations as list of tuples
     datasets = [
         ("ivrit-ai/eval-d1:test:text", None, "ivrit_ai_eval_d1"),
+        ("ivrit-ai/eval-whatsapp:test:text", None, "ivrit_ai_eval_whatsapp"),
         ("upai-inc/saspeech:test:text", None, "saspeech"),
         ("google/fleurs:test:transcription", "he_il", "fleurs"),
         ("mozilla-foundation/common_voice_17_0:test:sentence", "he", "common_voice_17"),

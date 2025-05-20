@@ -46,8 +46,12 @@ def create_app(**kwargs) -> Callable:
     else:
         device, device_index = get_device_and_index(device)
 
-    print(f'Loading faster-whisper model: {model_path} on {device} with index: {device_index or "auto"}')
-    model = faster_whisper.WhisperModel(model_path, device=device, device_index=device_index)
+    args = { 'device' : device }
+    if device_index:
+        args['device_index'] = device_index
+
+    print(f'Loading faster-whisper model: {model_path} on {device} with index: {device_index or 0}')
+    model = faster_whisper.WhisperModel(model_path, **args)
 
     def transcribe_fn(entry):
         return transcribe(model, entry)
