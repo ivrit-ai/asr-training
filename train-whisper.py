@@ -49,7 +49,7 @@ def load_datasets(dataset_specs):
         # than ".arrow" files which leads to a mis-detection of the dataset format.
         # The "load_from_disk" API can get around this problem since it's designed to load
         # such locally stored dataset generated using "save_to_disk"
-        except ValueError:
+        except:
             dataset = load_from_disk(dataset_name)
             
             # But, we want to support the flexible "split instruction" syntax like load_dataset provides.

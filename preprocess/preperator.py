@@ -201,12 +201,9 @@ class DatasetPreparator:
         result_example["pad_amount"] = pad_amount
         result_example["input_length"] = len(resampled_audio_array) / target_sampling_rate
 
-    def _prepare_example_text(self, example, ancillary_features, result_example, relative_sampling_ratios) -> None:
+    def _token_ids_from_example(self, example) -> list[int]:
         text = example["transcript"]
         has_timestamps = example["has_timestamps"] if "has_timestamps" in example else False
-        has_prev = example["has_prev"] if "has_prev" in example else False
-        prev_text = example["prev_transcript"] if has_prev else None
-
         tokenizer_result = self.processor.tokenizer(
             text,
             # We will take care of prefixes/suffixes manually
@@ -217,23 +214,40 @@ class DatasetPreparator:
             add_prefix_space=not has_timestamps,
             return_attention_mask=False,
         )
-        token_ids = tokenizer_result["input_ids"]
+        return tokenizer_result["input_ids"]
+
+    def _is_removable_timestamp_token_ids(self, token_ids) -> bool:
+        # If the last segment crosses over to the next audio slice
+        # we cannot strip timestamps, since without timestamps we must include all text
+        # within the slice. (and crossover omits that text).
+        # instead, we will force this to keep the timestamp tokens.
+        # If the token sequence ends with 2 adjacent timestamp tokens - it's the cross over case.
+        # it's sufficient to check if the 2nd token from the end is not a timestamp token
+        return len(token_ids) < 2 or token_ids[-2] < self.timestamp_begin_token_id
+
+    def _prepare_example_text(self, example, ancillary_features, result_example, relative_sampling_ratios) -> None:
+        has_timestamps = example["has_timestamps"] if "has_timestamps" in example else False
+        has_prev = example["has_prev"] if "has_prev" in example else False
+        prev_text = example["prev_transcript"] if has_prev else None
+        token_ids = self._token_ids_from_example(example)
 
         # Should we use and how we sample attributes
         if relative_sampling_ratios is None:
             use_timestamps_sampling_prob = self.timestamp_sample_prob
             use_prev_sampling_prob = self.condition_on_prev_sample_prob
         else:
-            use_timestamps_sampling_prob = relative_sampling_ratios["has_timestamps"]
+            use_timestamps_sampling_prob = relative_sampling_ratios["has_removable_timestamps"]
             use_prev_sampling_prob = relative_sampling_ratios["has_prev"]
 
         should_train_on_timestamps = bool(self.seed.binomial(1, use_timestamps_sampling_prob))
         should_condition_on_prev = has_prev and bool(self.seed.binomial(1, use_prev_sampling_prob))
 
         if has_timestamps and not should_train_on_timestamps:
-            # Remove all timestamp tokens
-            token_ids = [token_id for token_id in token_ids if token_id < self.timestamp_begin_token_id]
-            # Note - no-timestamp token id is prepended as part of the prefix later.
+            possible_to_strip_timestamps = self._is_removable_timestamp_token_ids(token_ids)
+            if possible_to_strip_timestamps:
+                # Remove all timestamp tokens
+                token_ids = [token_id for token_id in token_ids if token_id < self.timestamp_begin_token_id]
+                # Note - no-timestamp token id is prepended as part of the prefix later.
 
         prev_ids = []
         if should_condition_on_prev and has_prev:
@@ -410,11 +424,19 @@ class DatasetPreparator:
         if self.timestamp_sample_prob < 1.0 or self.condition_on_prev_sample_prob < 1.0:
             print(f"Estimating attribute frequencies for relative sub-sampling.")
 
+            def has_timestamps_discriminator(example):
+                has_timestamps = "has_timestamps" in example and example["has_timestamps"]
+                if has_timestamps:
+                    token_ids = self._token_ids_from_example(example)
+                    return self._is_removable_timestamp_token_ids(token_ids)
+                else:
+                    return False
+
             # Estimate the ratios of the attributes in the dataset
             estimations = self.estimate_attribute_ratios(
                 dataset,
                 {
-                    "has_timestamps": lambda example: "has_timestamps" in example and example["has_timestamps"],
+                    "has_removable_timestamps": has_timestamps_discriminator,
                     "has_prev": lambda example: "has_prev" in example and example["has_prev"],
                 },
                 target_sampling_error_range=0.05,
