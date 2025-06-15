@@ -10,7 +10,7 @@ Usage on Ubuntu 22.04 with CUDA:
     pip install faster-whisper==1.1.1
     wget https://developer.download.nvidia.com/compute/cudnn/9.1.0/local_installers/cudnn-local-repo-ubuntu2204-9.1.0_1.0-1_amd64.deb
     sudo dpkg -i cudnn-local-repo-ubuntu2204-9.1.0_1.0-1_amd64.deb && sudo cp /var/cudnn-local-repo-ubuntu2204-9.1.0/cudnn-*-keyring.gpg /usr/share/keyrings/
-    sudo apt-get update && sudo apt-get -y install cudnn
+    sudo apt-get update && sudo apt-get -y install cudnn -y
 """
 
 import faster_whisper
