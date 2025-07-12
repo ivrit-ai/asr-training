@@ -44,6 +44,9 @@ def load_datasets(dataset_specs):
         
         try:
             dataset = load_dataset(dataset_name, split=split)
+            if dataset.builder_name == "json" and not "transcript" in dataset.features:
+                print(f"Assumed dataset format mis-detection. Attempting to load. using `load_from_disk` instead. (See comments in code)")
+                raise ValueError("Dataset format mis-detection.")
         
         # Local datasets, could suffer from a bug where there are more ".json" files
         # than ".arrow" files which leads to a mis-detection of the dataset format.
@@ -208,6 +211,9 @@ def parse_arguments():
         nargs="*",
         help="Dataset(s) to train on. Format: dataset_name[:split_name]",
     )
+    parser.add_argument(
+        "--target_language", type=str, default="hebrew", help="The target training language (Only a single language training is currently supported)"
+    )
     parser.add_argument("--save_processed", help="Dataset name to save processed data (will save both train and eval)")
     parser.add_argument(
         "--include_timestamps_prob",
@@ -323,7 +329,7 @@ def main():
     if args.use_preprocessed and args.save_processed:
         raise ValueError("Cannot use preprocessed data and save preprocessed data at the same time.")
 
-    processor = WhisperProcessor.from_pretrained(args.model_name, language="hebrew", task="transcribe")
+    processor = WhisperProcessor.from_pretrained(args.model_name, language=args.target_language, task="transcribe")
     preparator = DatasetPreparator(
         processor,
         proc_num=args.ds_processor_proc_num,
@@ -427,7 +433,7 @@ def main():
 
     model.config.use_cache = False
 
-    model.generate = partial(model.generate, language="hebrew", task="transcribe", use_cache=True)
+    model.generate = partial(model.generate, language=args.target_language, task="transcribe", use_cache=True)
 
     training_args = Seq2SeqTrainingArguments(
         output_dir=args.output_model_name,
