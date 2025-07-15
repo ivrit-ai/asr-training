@@ -3,7 +3,8 @@ import soundfile
 import uuid
 import os
 import librosa
-from typing import Dict, Any, Callable
+import time
+from typing import Dict, Any, Callable, Tuple
 from google.cloud import speech, storage
 
 
@@ -43,10 +44,12 @@ def create_app(**kwargs) -> Callable:
             model="default",
         )
 
+        start_time = time.time()
         operation = speech_client.long_running_recognize(config=config, audio=audio)
         response = operation.result(timeout=90)
+        transcription_time = time.time() - start_time
         blob.delete()
 
-        return " ".join(result.alternatives[0].transcript for result in response.results)
+        return " ".join(result.alternatives[0].transcript for result in response.results), transcription_time
 
     return transcribe

@@ -6,7 +6,7 @@ import time
 import requests
 import uuid
 import asyncio
-from typing import Dict, Any, Callable
+from typing import Dict, Any, Callable, Tuple
 from amazon_transcribe.client import TranscribeStreamingClient
 from amazon_transcribe.handlers import TranscriptResultStreamHandler
 from amazon_transcribe.model import TranscriptEvent
@@ -70,7 +70,7 @@ def create_app(**kwargs) -> Callable:
                 entry["audio"]["array"], orig_sr=entry["audio"]["sampling_rate"], target_sr=16000
             )
             if len(audio_data) / 16000 < 0.5:
-                return ""
+                return "", 0.0
 
             wav_buffer = io.BytesIO()
             soundfile.write(wav_buffer, audio_data, 16000, format="WAV")
@@ -87,6 +87,7 @@ def create_app(**kwargs) -> Callable:
                 LanguageCode="he-IL",
             )
 
+            start_time = time.time()
             while True:
                 status = transcribe_client.get_transcription_job(TranscriptionJobName=job_name)
                 if status["TranscriptionJob"]["TranscriptionJobStatus"] in ["COMPLETED", "FAILED"]:
@@ -96,7 +97,8 @@ def create_app(**kwargs) -> Callable:
             if status["TranscriptionJob"]["TranscriptionJobStatus"] == "COMPLETED":
                 transcript_uri = status["TranscriptionJob"]["Transcript"]["TranscriptFileUri"]
                 response = requests.get(transcript_uri)
-                return response.json()["results"]["transcripts"][0]["transcript"]
+                transcription_time = time.time() - start_time
+                return response.json()["results"]["transcripts"][0]["transcript"], transcription_time
             else:
                 raise Exception(f"Transcription job failed: {status}")
 
@@ -109,13 +111,16 @@ def create_app(**kwargs) -> Callable:
                 entry["audio"]["array"], orig_sr=entry["audio"]["sampling_rate"], target_sr=16000
             )
             if len(audio_data) / 16000 < 0.5:
-                return ""
+                return "", 0.0
 
             wav_buffer = io.BytesIO()
             soundfile.write(wav_buffer, audio_data, 16000, format="WAV")
             audio_bytes = wav_buffer.getvalue()
 
-            return asyncio.run(process_stream_audio(audio_bytes))
+            start_time = time.time()
+            result = asyncio.run(process_stream_audio(audio_bytes))
+            transcription_time = time.time() - start_time
+            return result, transcription_time
 
         return transcribe_stream
 

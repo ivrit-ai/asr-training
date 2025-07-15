@@ -1,6 +1,7 @@
 import io
 import os
-from typing import Callable
+import time
+from typing import Callable, Tuple
 
 import pydub
 import soundfile
@@ -56,9 +57,11 @@ def create_app(**kwargs) -> Callable:
         audio = pydub.AudioSegment.from_file(wav_buffer, format="wav")
         audio.export("temp.mp3", format="mp3")
 
+        start_time = time.time()
         result = model.transcribe("temp.mp3", language="he", beam_size=5, best_of=5)
+        transcription_time = time.time() - start_time
         os.remove("temp.mp3")
 
-        return result["text"]
+        return result["text"], transcription_time
 
     return transcribe
