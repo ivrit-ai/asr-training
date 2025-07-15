@@ -43,7 +43,9 @@ def process_entry(args):
     i, entry, transcribe_fn, text_column, normalizer = args
 
     raw_ref_text = entry[text_column]
-    raw_eval_text = transcribe_fn(entry)
+    
+    # transcribe_fn returns (text, transcription_time)
+    raw_eval_text, transcription_time = transcribe_fn(entry)
 
     ref_text = normalizer(raw_ref_text)
     eval_text = normalizer(raw_eval_text)
@@ -62,6 +64,8 @@ def process_entry(args):
         "deletions": entry_metrics.deletions,
         "insertions": entry_metrics.insertions,
         "hits": entry_metrics.hits,
+        "audio_duration": len(entry["audio"]["array"]) / entry["audio"]["sampling_rate"],
+        "transcription_time": transcription_time,
     }
 
     for key in entry.keys():
@@ -88,6 +92,55 @@ def calculate_final_metrics(df: pandas.DataFrame):
     )
 
     return results
+
+
+def calculate_transcription_time_stats(df: pandas.DataFrame):
+    """Calculate transcription time statistics normalized per audio second and per output character"""
+    
+    # Calculate audio durations and text lengths
+    audio_durations = []
+    text_lengths = []
+    transcription_times = []
+    
+    for _, row in df.iterrows():
+        # Get audio duration from stored value
+        audio_duration = row.get("audio_duration", 1.0)  # Default to 1 second if not available
+        audio_durations.append(audio_duration)
+        
+        # Get text length (number of characters)
+        text_length = len(row["predicted_text"]) if row["predicted_text"] else 0
+        text_lengths.append(text_length)
+        
+        # Get transcription time
+        transcription_time = row.get("transcription_time", 0)
+        transcription_times.append(transcription_time)
+    
+    # Calculate normalized times
+    time_per_second = [t / d if d > 0 else 0 for t, d in zip(transcription_times, audio_durations)]
+    time_per_char = [t / l if l > 0 else 0 for t, l in zip(transcription_times, text_lengths)]
+    
+    # Calculate statistics
+    def calculate_percentiles(data):
+        data = [x for x in data if x > 0]  # Filter out zeros
+        if not data:
+            return {"mean": 0, "median": 0, "p90": 0, "p99": 0}
+        
+        data.sort()
+        n = len(data)
+        return {
+            "mean": sum(data) / n,
+            "median": data[n // 2] if n % 2 == 1 else (data[n // 2 - 1] + data[n // 2]) / 2,
+            "p90": data[int(0.9 * n)] if n > 0 else 0,
+            "p99": data[int(0.99 * n)] if n > 0 else 0
+        }
+    
+    time_per_second_stats = calculate_percentiles(time_per_second)
+    time_per_char_stats = calculate_percentiles(time_per_char)
+    
+    return {
+        "time_per_second": time_per_second_stats,
+        "time_per_char": time_per_char_stats
+    }
 
 def evaluate_model(transcribe_fn, ds, text_column, num_workers=1):
     normalizer = HebrewTextNormalizer()
@@ -172,5 +225,22 @@ if __name__ == "__main__":
 
     # Calculate final metrics
     metrics = calculate_final_metrics(results_df)
+    
+    # Calculate transcription time statistics
+    time_stats = calculate_transcription_time_stats(results_df)
 
     print(f"Evaluation done. WER={metrics.wer}, WIL={metrics.wil}.")
+    
+    # Report transcription time statistics
+    print("\nTranscription Time Statistics:")
+    print("Per Audio Second:")
+    print(f"  Mean: {time_stats['time_per_second']['mean']:.3f}s")
+    print(f"  Median: {time_stats['time_per_second']['median']:.3f}s")
+    print(f"  90th percentile: {time_stats['time_per_second']['p90']:.3f}s")
+    print(f"  99th percentile: {time_stats['time_per_second']['p99']:.3f}s")
+    
+    print("Per Output Character:")
+    print(f"  Mean: {time_stats['time_per_char']['mean']:.3f}s")
+    print(f"  Median: {time_stats['time_per_char']['median']:.3f}s")
+    print(f"  90th percentile: {time_stats['time_per_char']['p90']:.3f}s")
+    print(f"  99th percentile: {time_stats['time_per_char']['p99']:.3f}s")

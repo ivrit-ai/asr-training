@@ -1,21 +1,24 @@
 import io
-from typing import Any, Callable, Dict
+import time
+from typing import Any, Callable, Dict, Tuple
 
 import faster_whisper
 import soundfile
 
 
-def transcribe(model, entry: Dict[str, Any]) -> str:
+def transcribe(model, entry: Dict[str, Any]) -> Tuple[str, float]:
     wav_buffer = io.BytesIO()
     soundfile.write(wav_buffer, entry["audio"]["array"], entry["audio"]["sampling_rate"], format="WAV")
     wav_buffer.seek(0)
 
+    start_time = time.time()
     texts = []
     segs, dummy = model.transcribe(wav_buffer, language="he")
     for s in segs:
         texts.append(s.text)
+    transcription_time = time.time() - start_time
 
-    return " ".join(texts)
+    return " ".join(texts), transcription_time
 
 
 def get_device_and_index(device: str) -> tuple[str, int | None]:

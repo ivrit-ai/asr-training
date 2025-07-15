@@ -3,8 +3,9 @@ import soundfile
 import pydub
 import base64
 import os
+import time
 import runpod
-from typing import Dict, Any, Callable
+from typing import Dict, Any, Callable, Tuple
 
 
 def create_app(**kwargs) -> Callable:
@@ -33,9 +34,11 @@ def create_app(**kwargs) -> Callable:
         payload = {"type": "blob", "data": data, "model": model_path}
 
         try:
+            start_time = time.time()
             result = endpoint.run_sync(payload)
+            transcription_time = time.time() - start_time
             texts = [e["text"] for e in result[0]["result"]]
-            return " ".join(texts)
+            return " ".join(texts), transcription_time
         except Exception as e:
             print(f"Exception calling runpod: {e}")
             raise e

@@ -1,7 +1,8 @@
 import io
 import soundfile
 import os
-from typing import Dict, Any, Callable
+import time
+from typing import Dict, Any, Callable, Tuple
 from elevenlabs import ElevenLabs
 
 
@@ -21,13 +22,15 @@ def create_app(**kwargs) -> Callable:
 
         try:
             # Call ElevenLabs Speech-to-Text API
+            start_time = time.time()
             response = client.speech_to_text.convert(
                 model_id=model_path,
                 file=wav_buffer,
                 language_code="heb",
                 tag_audio_events=False
             )
-            return response.text
+            transcription_time = time.time() - start_time
+            return response.text, transcription_time
         except Exception as e:
             print(f"Exception calling ElevenLabs API: {e}")
             raise e

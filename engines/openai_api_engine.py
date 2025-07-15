@@ -2,8 +2,9 @@ import io
 import soundfile
 import pydub
 import os
+import time
 from openai import OpenAI
-from typing import Dict, Any, Callable
+from typing import Dict, Any, Callable, Tuple
 
 
 def create_app(**kwargs) -> Callable:
@@ -30,12 +31,14 @@ def create_app(**kwargs) -> Callable:
 
         try:
             # Call OpenAI's Whisper API
+            start_time = time.time()
             response = client.audio.transcriptions.create(
                 model=model_path,
                 file=("audio.mp3", mp3_buffer, "audio/mpeg"),
                 language="he"  # Specify Hebrew language
             )
-            return response.text
+            transcription_time = time.time() - start_time
+            return response.text, transcription_time
         except Exception as e:
             print(f"Exception calling OpenAI Whisper API: {e}")
             raise e
