@@ -95,7 +95,7 @@ def calculate_final_metrics(df: pandas.DataFrame):
 
 
 def calculate_transcription_time_stats(df: pandas.DataFrame):
-    """Calculate transcription time statistics normalized per audio second and per output character"""
+    """Calculate transcription time statistics: per audio second, per output character, and raw transcription time"""
     
     # Calculate audio durations and text lengths
     audio_durations = []
@@ -136,10 +136,12 @@ def calculate_transcription_time_stats(df: pandas.DataFrame):
     
     time_per_second_stats = calculate_percentiles(time_per_second)
     time_per_char_stats = calculate_percentiles(time_per_char)
+    raw_time_stats = calculate_percentiles(transcription_times)
     
     return {
         "time_per_second": time_per_second_stats,
-        "time_per_char": time_per_char_stats
+        "time_per_char": time_per_char_stats,
+        "raw_time": raw_time_stats
     }
 
 def evaluate_model(transcribe_fn, ds, text_column, num_workers=1):
@@ -244,3 +246,9 @@ if __name__ == "__main__":
     print(f"  Median: {time_stats['time_per_char']['median']:.3f}s")
     print(f"  90th percentile: {time_stats['time_per_char']['p90']:.3f}s")
     print(f"  99th percentile: {time_stats['time_per_char']['p99']:.3f}s")
+    
+    print("Raw Transcription Time:")
+    print(f"  Mean: {time_stats['raw_time']['mean']:.3f}s")
+    print(f"  Median: {time_stats['raw_time']['median']:.3f}s")
+    print(f"  90th percentile: {time_stats['raw_time']['p90']:.3f}s")
+    print(f"  99th percentile: {time_stats['raw_time']['p99']:.3f}s")
