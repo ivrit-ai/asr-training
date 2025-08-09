@@ -157,22 +157,81 @@ def convert_to_ggml(model_name, output_dir):
         print(f"Cleaning up temporary directory: {temp_dir}")
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+def convert_to_mlx(model_name, output_dir, dtype="float16", quantize=False, q_group_size=64, q_bits=4):
+    """Convert a model to MLX format using convert.py script."""
+    import platform
+    
+    # Check if running on Apple Silicon Mac
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        print("Warning: MLX conversion is optimized for Apple Silicon Macs")
+        print("Proceeding anyway, but performance may not be optimal")
+    
+    # Check if convert.py exists
+    convert_script = "convert.py"
+    if not os.path.exists(convert_script):
+        print(f"Error: {convert_script} not found")
+        print("MLX conversion requires the convert.py script")
+        return False
+    
+    print(f"Converting model: {model_name}")
+    print(f"Output directory: {output_dir}")
+    print(f"Data type: {dtype}")
+    print(f"Quantize: {quantize}")
+    
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Build the command
+    command = [
+        "python3", convert_script,
+        "--torch-name-or-path", model_name,
+        "--mlx-path", output_dir,
+        "--dtype", dtype
+    ]
+    
+    # Add quantization options if enabled
+    if quantize:
+        command.extend([
+            "--quantize",
+            "--q-group-size", str(q_group_size),
+            "--q-bits", str(q_bits)
+        ])
+    
+    print(f"Running command: {' '.join(command)}")
+    result = subprocess.run(command)
+    
+    if result.returncode == 0:
+        print("Conversion to MLX completed successfully!")
+        print(f"Converted model is available at: {output_dir}")
+        return True
+    else:
+        print("Error: MLX conversion failed")
+        return False
+
 def main():
     parser = argparse.ArgumentParser(description="Convert a model to different formats")
     parser.add_argument("-m", "--model", default="openai/whisper-large-v3", 
                         help="Model name or path (default: openai/whisper-large-v3)")
     parser.add_argument("-o", "--output", help="Base output directory (default: model-name)")
     parser.add_argument("-f", "--formats", default=None, 
-                        help="Comma-separated list of output formats (default: all, options: ct2,onnx,ggml)")
+                        help="Comma-separated list of output formats (default: all, options: ct2,onnx,ggml,mlx)")
     parser.add_argument("-q", "--quant", default="float16",
                         help="Quantization type for CT2 format (default: float16)")
+    parser.add_argument("--mlx-dtype", default="float16",
+                        help="Data type for MLX format (default: float16, options: float16,float32)")
+    parser.add_argument("--mlx-quantize", action="store_true",
+                        help="Quantize MLX model")
+    parser.add_argument("--mlx-q-group-size", default=64, type=int,
+                        help="Group size for MLX quantization (default: 64)")
+    parser.add_argument("--mlx-q-bits", default=4, type=int,
+                        help="Bits per weight for MLX quantization (default: 4)")
     
     args = parser.parse_args()
     
     model_name = args.model
     
     # Define valid formats
-    valid_formats = ["ct2", "onnx", "ggml"]
+    valid_formats = ["ct2", "onnx", "ggml", "mlx"]
     
     # If no formats specified, use all formats
     if args.formats is None:
@@ -211,6 +270,15 @@ def main():
             results[fmt] = convert_to_onnx(model_name, output_dir)
         elif fmt == "ggml":
             results[fmt] = convert_to_ggml(model_name, output_dir)
+        elif fmt == "mlx":
+            results[fmt] = convert_to_mlx(
+                model_name, 
+                output_dir, 
+                args.mlx_dtype,
+                args.mlx_quantize,
+                args.mlx_q_group_size,
+                args.mlx_q_bits
+            )
     
     # Print summary
     print("\n=== Conversion Summary ===")

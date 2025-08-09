@@ -37,3 +37,7 @@ ctranslate2
 optimum[exporters]
 onnx
 onnxruntime
+mlx-whisper>=0.4.2; platform_machine=='arm64' and sys_platform=='darwin'
+huggingface-hub
+safetensors
+GitPython
