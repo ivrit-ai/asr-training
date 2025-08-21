@@ -95,9 +95,9 @@ def calculate_final_metrics(df: pandas.DataFrame):
 
 
 def calculate_transcription_time_stats(df: pandas.DataFrame):
-    """Calculate transcription time statistics: per audio second, per output character, and raw transcription time"""
+    """Calculate transcription time statistics for segments >= 5 seconds: per audio second, per output character, and raw transcription time"""
     
-    # Calculate audio durations and text lengths
+    # Calculate audio durations and text lengths, filtering segments >= 5 seconds
     audio_durations = []
     text_lengths = []
     transcription_times = []
@@ -105,6 +105,11 @@ def calculate_transcription_time_stats(df: pandas.DataFrame):
     for _, row in df.iterrows():
         # Get audio duration from stored value
         audio_duration = row.get("audio_duration", 1.0)  # Default to 1 second if not available
+        
+        # Skip segments shorter than 5 seconds
+        if audio_duration < 5.0:
+            continue
+            
         audio_durations.append(audio_duration)
         
         # Get text length (number of characters)
@@ -187,6 +192,12 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # Parse dataset info from command line argument
+    dataset_parts = args.dataset.split(":")
+    dataset_name = dataset_parts[0]
+    dataset_split = dataset_parts[1] if len(dataset_parts) > 1 else "test"
+    ds_text_column = dataset_parts[2] if len(dataset_parts) > 2 else "text"
+
     output_exists = os.path.exists(args.output)
 
     if output_exists and not args.overwrite:
@@ -203,11 +214,6 @@ if __name__ == "__main__":
         transcribe_fn = engine.create_app(model_path=args.model, device=args.device)
 
         print(f"Loading dataset {args.dataset}...")
-        dataset_parts = args.dataset.split(":")
-        dataset_name = dataset_parts[0]
-        dataset_split = dataset_parts[1] if len(dataset_parts) > 1 else "test"
-        ds_text_column = dataset_parts[2] if len(dataset_parts) > 2 else "text"
-
         if args.name:
             ds = datasets.load_dataset(dataset_name, name=args.name, trust_remote_code=True)[dataset_split]
         else:
@@ -233,22 +239,6 @@ if __name__ == "__main__":
 
     print(f"Evaluation done. WER={metrics.wer}, WIL={metrics.wil}.")
     
-    # Report transcription time statistics
-    print("\nTranscription Time Statistics:")
-    print("Per Audio Second:")
-    print(f"  Mean: {time_stats['time_per_second']['mean']:.3f}s")
-    print(f"  Median: {time_stats['time_per_second']['median']:.3f}s")
-    print(f"  90th percentile: {time_stats['time_per_second']['p90']:.3f}s")
-    print(f"  99th percentile: {time_stats['time_per_second']['p99']:.3f}s")
-    
-    print("Per Output Character:")
-    print(f"  Mean: {time_stats['time_per_char']['mean']:.3f}s")
-    print(f"  Median: {time_stats['time_per_char']['median']:.3f}s")
-    print(f"  90th percentile: {time_stats['time_per_char']['p90']:.3f}s")
-    print(f"  99th percentile: {time_stats['time_per_char']['p99']:.3f}s")
-    
-    print("Raw Transcription Time:")
-    print(f"  Mean: {time_stats['raw_time']['mean']:.3f}s")
-    print(f"  Median: {time_stats['raw_time']['median']:.3f}s")
-    print(f"  90th percentile: {time_stats['raw_time']['p90']:.3f}s")
-    print(f"  99th percentile: {time_stats['raw_time']['p99']:.3f}s")
+    # Print one-liner results
+    workload = f"{dataset_name}:{dataset_split}"
+    print(f"{workload}\t{time_stats['raw_time']['mean']:.3f}\t{time_stats['raw_time']['median']:.3f}\t{time_stats['raw_time']['p90']:.3f}\t{time_stats['raw_time']['p99']:.3f}\t{time_stats['time_per_second']['mean']:.3f}\t{time_stats['time_per_second']['median']:.3f}\t{time_stats['time_per_second']['p90']:.3f}\t{time_stats['time_per_second']['p99']:.3f}\t{time_stats['time_per_char']['mean']:.3f}\t{time_stats['time_per_char']['median']:.3f}\t{time_stats['time_per_char']['p90']:.3f}\t{time_stats['time_per_char']['p99']:.3f}")
