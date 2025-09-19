@@ -461,6 +461,71 @@ def generate_examples_from_slices(
     logger.debug(f"Done with samples from {source_id}/{source_entry_id}")
 
 
+def parse_exclude_filter(filter_str: str) -> tuple[str, str, str]:
+    """
+    Parse a filter string in format 'field_path:eq:value' into components.
+
+    Args:
+        filter_str: Filter string like 'source_id:eq:youtube'
+
+    Returns:
+        Tuple of (field_path, operator, value)
+    """
+    parts = filter_str.split(":", 2)
+    if len(parts) != 3:
+        raise ValueError(f"Invalid filter format: {filter_str}. Expected 'field_path:eq:value'")
+    field_path, operator, value = parts
+    if operator != "eq":
+        raise ValueError(f"Unsupported operator: {operator}. Only 'eq' is supported")
+    return field_path, operator, value
+
+
+def get_nested_value(obj: dict, field_path: str):
+    """
+    Get a value from a nested dictionary using dot notation.
+
+    Args:
+        obj: Dictionary to traverse
+        field_path: Dot-separated path like 'metadata.source_id'
+
+    Returns:
+        The value at the specified path, or None if path doesn't exist
+    """
+    keys = field_path.split(".")
+    current = obj
+    try:
+        for key in keys:
+            if isinstance(current, dict):
+                current = current[key]
+            else:
+                return None
+        return current
+    except (KeyError, TypeError):
+        return None
+
+
+def should_exclude_entry(metadata: dict, exclude_filters: list[tuple[str, str, str]]) -> bool:
+    """
+    Check if an entry should be excluded based on metadata filters.
+
+    Args:
+        metadata: Metadata dictionary
+        exclude_filters: List of parsed filter tuples (field_path, operator, value)
+
+    Returns:
+        True if the entry should be excluded, False otherwise
+    """
+    if not exclude_filters:
+        return False
+
+    # OR logic: exclude if ANY filter matches
+    for field_path, operator, value in exclude_filters:
+        actual_value = get_nested_value(metadata, field_path)
+        if actual_value is not None and str(actual_value) == value:
+            return True
+    return False
+
+
 def prepare_training_dataset(
     input_folder: Path,
     slice_length: int = 30,
@@ -473,6 +538,7 @@ def prepare_training_dataset(
     per_sample_quality_threshold: float = 0,
     per_segment_quality_threshold: float = 0,
     copy_metadata_fields: list[str] = [],
+    exclude_filters: list[str] = [],
 ) -> Dataset:
     """
     Prepare captioned datasets from the input folder.
@@ -500,15 +566,21 @@ def prepare_training_dataset(
     def examples_from_entry_generator(input_manifest_shards):
         for audio_file, segments_data_file, metadata_file in input_manifest_shards:
             try:
+                # Load metadata first to check exclusion filters
+                with open(metadata_file, "r") as f:
+                    metadata = json.load(f)
+
+                # Check if entry should be excluded based on metadata filters
+                if should_exclude_entry(metadata, exclude_filters):
+                    logger.debug(f"Excluding sample {audio_file} based on metadata filters")
+                    continue
+
                 # Load captions
                 segments_data = WhisperResult(str(segments_data_file))
                 segments = segments_data.segments
 
-                # Load metadata
-                sample_quality_score = None
-                with open(metadata_file, "r") as f:
-                    metadata = json.load(f)
-                    sample_quality_score = metadata.get("quality_score", None)
+                # Get sample quality score
+                sample_quality_score = metadata.get("quality_score", None)
 
                 if (
                     sample_quality_score is not None
@@ -655,6 +727,12 @@ if __name__ == "__main__":
         default=[],
         help="specify dataset specific metadata fields to copy into output segments from souce entries",
     )
+    parser.add_argument(
+        "--exclude_by_md",
+        nargs="+",
+        default=[],
+        help="Exclude entries by metadata property filters in format 'field_path:eq:value'. Multiple filters are joined with OR logic.",
+    )
     parser.add_argument("--push_to_hub", action="store_true", help="Push the dataset to the hub")
     parser.add_argument(
         "--output_dataset_name", type=str, help="Name of the dataset, Omit to not store any dataset (dry-run)"
@@ -700,6 +778,17 @@ if __name__ == "__main__":
     else:
         logger.setLevel(level=numeric_level)
 
+    # Parse exclude filters
+    parsed_exclude_filters = []
+    if args.exclude_by_md:
+        for filter_str in args.exclude_by_md:
+            try:
+                parsed_filter = parse_exclude_filter(filter_str)
+                parsed_exclude_filters.append(parsed_filter)
+            except ValueError as e:
+                logger.error(f"Invalid exclude filter '{filter_str}': {e}")
+                raise
+
     # Prepare the dataset
     output_dataset = prepare_training_dataset(
         input_folder=args.input_folder,
@@ -711,6 +800,7 @@ if __name__ == "__main__":
         per_sample_quality_threshold=args.per_sample_quality_threshold,
         per_segment_quality_threshold=args.per_segment_quality_threshold,
         copy_metadata_fields=args.copy_metadata_fields,
+        exclude_filters=parsed_exclude_filters,
     )
 
     if output_dataset:
