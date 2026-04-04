@@ -108,6 +108,9 @@ def main():
     parser.add_argument("--workers", type=int, default=1, help="Number of parallel workers")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output files if exists")
     parser.add_argument("--device", type=str, default="auto", help="copmute device")
+    parser.add_argument("--parallel-mode", type=str, default="thread", help="parallism approach for mulit-worker evaluation")
+    parser.add_argument("--devices", type=str, default="", help="Devices list to use for process multi-worker evaluation (GPU Bound)")
+    parser.add_argument("--batch-size", type=str, default="1", help="per transcribe call batch size")
     parser.add_argument("--benchmark-timing", type=int, default=None, metavar="N",
                         help="Run each transcription N times and store all timing results")
     args = parser.parse_args()
@@ -163,7 +166,13 @@ def main():
             "--output",
             output_file,
             "--device",
-            args.device
+            args.device,
+            "--batch-size",
+            args.batch_size,
+            "--parallel-mode",
+            args.parallel_mode,
+            "--devices",
+            args.devices
         ]
 
         if args.overwrite:
