@@ -16,6 +16,7 @@ from transformers import (
     BitsAndBytesConfig,
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
+    TrainerCallback,
     WhisperForConditionalGeneration,
     WhisperProcessor,
 )
@@ -162,6 +163,65 @@ def compute_metrics(pred, processor, metric, normalizer):
     return {"wer_ortho": wer_ortho, "wer": wer}
 
 
+def freeze_encoder(model):
+    """Freeze all audio-encoder parameters (they stay out of the optimizer)."""
+    frozen = 0
+    for p in model.model.encoder.parameters():
+        if p.requires_grad:
+            p.requires_grad = False
+            frozen += p.numel()
+    print(f"[freeze] encoder frozen ({frozen:,} params will not train)")
+
+
+class EmbeddingWarmupCallback(TrainerCallback):
+    """
+    Stage the decoder unfreeze: for the first `warmup_steps` optimizer steps, train ONLY
+    the decoder token embeddings (embed_tokens, tied to proj_out); then release the rest
+    of the decoder so the whole decoder trains.
+
+    How it stays correct with the HF Trainer optimizer:
+      - The optimizer is built once, over params that require grad AT THAT TIME. So the
+        rest-of-decoder params must be trainable when the optimizer is created (they are:
+        we only flip them off in on_train_begin, which runs AFTER optimizer creation).
+      - During warmup those params have requires_grad=False -> no grad is produced ->
+        AdamW skips them entirely (no update, no weight-decay leak).
+      - At `warmup_steps` we flip them back on and they start updating.
+
+    NOTE (multi-GPU): DDP registers grad hooks at construction over the then-trainable
+    params. Flipping requires_grad mid-run can break DDP. For DDP, prefer running the
+    warmup as a separate short job, or keep this to single-process training.
+    """
+
+    def __init__(self, model, warmup_steps: int):
+        self.model = model
+        self.warmup_steps = warmup_steps
+        self._frozen_params = []
+        self._released = False
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        if self.warmup_steps <= 0:
+            return
+        embed = self.model.model.decoder.embed_tokens
+        embed_ids = {id(p) for p in embed.parameters()}
+        for _, p in self.model.model.decoder.named_parameters():
+            if id(p) in embed_ids:
+                continue  # keep embeddings trainable
+            if p.requires_grad:
+                p.requires_grad = False
+                self._frozen_params.append(p)
+        print(
+            f"[warmup] embeddings-only for {self.warmup_steps} steps "
+            f"(temporarily froze {len(self._frozen_params)} decoder tensors)"
+        )
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        if self.warmup_steps > 0 and not self._released and state.global_step >= self.warmup_steps:
+            for p in self._frozen_params:
+                p.requires_grad = True
+            self._released = True
+            print(f"[warmup] released decoder at step {state.global_step}; full decoder now trains")
+
+
 def prepare_model_for_qlora(model):
     model = prepare_model_for_kbit_training(model)
 
@@ -289,6 +349,21 @@ def parse_arguments():
         help="Attention implementation to use (only 'sdpa' available)",
     )
     parser.add_argument("--use_qlora", action="store_true", help="Use QLoRA for training")
+    parser.add_argument(
+        "--freeze_encoder",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Freeze the whole audio encoder (default: off)."
+        "For tokenizer-only optimization the acoustics are unchanged, so the encoder should stay frozen.",
+    )
+    parser.add_argument(
+        "--embedding_warmup_steps",
+        type=int,
+        default=0,
+        help="Train ONLY the decoder token embeddings for this many optimizer steps before "
+        "releasing the rest of the decoder. 0 disables the warmup (full decoder from step 0). "
+        "Single-process/single-GPU recommended (see note in code for DDP).",
+    )
     parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate")
     parser.add_argument("--warmup_ratio", type=float, default=0.1, help="Warmup ratio")
     parser.add_argument("--num_train_epochs", type=int, default=10, help="Number of training epochs")
@@ -433,6 +508,15 @@ def main():
 
     model.config.use_cache = False
 
+    # --- Freezing controls (tokenizer-optimization training) ---
+    # For tokenizer-only optimization the acoustics don't change, so the encoder should
+    # stay frozen; the decoder (esp. the new token embeddings) is what adapts.
+    if args.use_qlora:
+        if args.freeze_encoder or args.embedding_warmup_steps > 0:
+            print("[freeze] --freeze_encoder / --embedding_warmup_steps are ignored with --use_qlora")
+    elif args.freeze_encoder:
+        freeze_encoder(model)
+
     model.generate = partial(model.generate, language=args.target_language, task="transcribe", use_cache=True)
 
     training_args = Seq2SeqTrainingArguments(
@@ -493,6 +577,10 @@ def main():
         processing_class=processor,
         compute_loss_func=compute_loss_func,
     )
+
+    # Staged decoder unfreeze: train embeddings only, then release the rest of the decoder.
+    if not args.use_qlora and args.embedding_warmup_steps > 0:
+        trainer.add_callback(EmbeddingWarmupCallback(model, args.embedding_warmup_steps))
 
     resume_from_checkpoint = False
     if args.resume_from_checkpoint:

@@ -82,7 +82,9 @@ class DatasetPreparator:
         self.start_of_prev_token_id = self.tokenizer.convert_tokens_to_ids("<|startofprev|>")
         self.no_timestamp_token_id = self.tokenizer.convert_tokens_to_ids("<|notimestamps|>")
         self.timestamp_begin_token_id = self.no_timestamp_token_id + 1
-        self.last_timestamp_token = self.tokenizer.total_vocab_size - 1
+        # len(tokenizer) = base vocab + added tokens (works across transformers versions;
+        # `total_vocab_size` does not exist in some pinned versions, e.g. 4.48.1).
+        self.last_timestamp_token = len(self.tokenizer) - 1
         self.total_timestamp_tokens = self.last_timestamp_token - self.timestamp_begin_token_id + 1
         self.max_allowed_tokenized_timestamp = (self.total_timestamp_tokens - 1) * self.tokenizer_time_precision
         self.prev_ids_max_length = whisper_max_target_positions // 2
