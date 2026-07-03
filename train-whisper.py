@@ -173,6 +173,26 @@ def freeze_encoder(model):
     print(f"[freeze] encoder frozen ({frozen:,} params will not train)")
 
 
+def freeze_decoder_except_embeddings(model):
+    """
+    Freeze every decoder parameter EXCEPT the token embeddings (embed_tokens, tied to
+    proj_out). Applied BEFORE the trainer/DDP wrap, so the frozen params are excluded
+    from DDP's reducer entirely — this is DDP-safe (unlike a mid-run requires_grad flip).
+
+    Use this for "train embeddings only" runs (the static equivalent of an effectively
+    infinite embedding warmup).
+    """
+    embed_ids = {id(p) for p in model.model.decoder.embed_tokens.parameters()}
+    frozen = 0
+    for _, p in model.model.decoder.named_parameters():
+        if id(p) in embed_ids:
+            continue  # keep token embeddings trainable
+        if p.requires_grad:
+            p.requires_grad = False
+            frozen += p.numel()
+    print(f"[freeze] decoder frozen except embeddings ({frozen:,} params will not train)")
+
+
 class EmbeddingWarmupCallback(TrainerCallback):
     """
     Stage the decoder unfreeze: for the first `warmup_steps` optimizer steps, train ONLY
@@ -362,7 +382,21 @@ def parse_arguments():
         default=0,
         help="Train ONLY the decoder token embeddings for this many optimizer steps before "
         "releasing the rest of the decoder. 0 disables the warmup (full decoder from step 0). "
-        "Single-process/single-GPU recommended (see note in code for DDP).",
+        "NOTE: this staged unfreeze uses a mid-run requires_grad flip and is SINGLE-PROCESS ONLY "
+        "(it breaks DDP). Under DDP use --train_embeddings_only, or --ddp_find_unused_parameters.",
+    )
+    parser.add_argument(
+        "--train_embeddings_only",
+        action="store_true",
+        help="Static, DDP-safe: freeze everything except the decoder token embeddings BEFORE the "
+        "trainer/DDP wrap (implies encoder frozen). Use this instead of a very long "
+        "--embedding_warmup_steps when training with DDP/accelerate.",
+    )
+    parser.add_argument(
+        "--ddp_find_unused_parameters",
+        action="store_true",
+        help="Set DDP find_unused_parameters=True. Needed if some trainable params don't receive "
+        "grad every step (e.g. staged --embedding_warmup_steps under DDP). Adds overhead.",
     )
     parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate")
     parser.add_argument("--warmup_ratio", type=float, default=0.1, help="Warmup ratio")
@@ -511,9 +545,19 @@ def main():
     # --- Freezing controls (tokenizer-optimization training) ---
     # For tokenizer-only optimization the acoustics don't change, so the encoder should
     # stay frozen; the decoder (esp. the new token embeddings) is what adapts.
+    #
+    # DDP note: any param that is trainable when the model is wrapped for DDP must receive
+    # a gradient every step (unless find_unused_parameters=True). So all freezing that
+    # should hold under DDP MUST happen HERE, before the trainer wraps the model — not in
+    # a callback. --train_embeddings_only does exactly that; --embedding_warmup_steps flips
+    # requires_grad mid-run and is single-process only.
     if args.use_qlora:
-        if args.freeze_encoder or args.embedding_warmup_steps > 0:
-            print("[freeze] --freeze_encoder / --embedding_warmup_steps are ignored with --use_qlora")
+        if args.freeze_encoder or args.embedding_warmup_steps > 0 or args.train_embeddings_only:
+            print("[freeze] freezing flags are ignored with --use_qlora")
+    elif args.train_embeddings_only:
+        # Static, DDP-safe: encoder + decoder(except embeddings) frozen up front.
+        freeze_encoder(model)
+        freeze_decoder_except_embeddings(model)
     elif args.freeze_encoder:
         freeze_encoder(model)
 
@@ -558,7 +602,7 @@ def main():
         # Configure save_only_model
         save_only_model=True if args.save_only_model else None,
         # There is not branching in training the Whisper model
-        ddp_find_unused_parameters=False,
+        ddp_find_unused_parameters=args.ddp_find_unused_parameters,
         # This would take longer, but will calculate the loss
         # with proper averaging across GPUs.
         # this is important when the dataset samples vary
@@ -579,8 +623,18 @@ def main():
     )
 
     # Staged decoder unfreeze: train embeddings only, then release the rest of the decoder.
+    # This flips requires_grad mid-run, which is incompatible with DDP unless
+    # find_unused_parameters=True. Warn if that looks likely to break.
     if not args.use_qlora and args.embedding_warmup_steps > 0:
-        trainer.add_callback(EmbeddingWarmupCallback(model, args.embedding_warmup_steps))
+        if args.train_embeddings_only:
+            print("[warmup] --train_embeddings_only is set; ignoring --embedding_warmup_steps "
+                  "(nothing to release — decoder stays frozen).")
+        else:
+            if torch.distributed.is_available() and torch.distributed.is_initialized() \
+                    and not args.ddp_find_unused_parameters:
+                print("[warmup] WARNING: --embedding_warmup_steps under DDP will fail unless "
+                      "--ddp_find_unused_parameters is set. Prefer --train_embeddings_only.")
+            trainer.add_callback(EmbeddingWarmupCallback(model, args.embedding_warmup_steps))
 
     resume_from_checkpoint = False
     if args.resume_from_checkpoint:
