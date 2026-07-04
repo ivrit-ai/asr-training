@@ -20,6 +20,30 @@ from transformers import (
     WhisperForConditionalGeneration,
     WhisperProcessor,
 )
+
+
+class FastEvalWhisperTrainer(Seq2SeqTrainer):
+    """Runs generation only on the first `num_gen_samples` eval samples;
+    every other sample just computes teacher-forced loss (fast)."""
+
+    def __init__(self, num_gen_samples=5, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.num_gen_samples = num_gen_samples
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        remaining = self.num_gen_samples - getattr(self, "_gen_counter", 0)
+        if remaining > 0:
+            batch_size = next(
+                v.shape[0] for v in inputs.values()
+                if isinstance(v, torch.Tensor) or hasattr(v, "shape")
+            )
+            self._gen_counter = getattr(self, "_gen_counter", 0) + batch_size
+            return super().prediction_step(model, inputs, prediction_loss_only=False, ignore_keys=ignore_keys)
+        return super().prediction_step(model, inputs, prediction_loss_only=True, ignore_keys=ignore_keys)
+
+    def evaluate(self, *args, **kwargs):
+        self._gen_counter = 0
+        return super().evaluate(*args, **kwargs)
 from transformers.modeling_outputs import Seq2SeqLMOutput
 from transformers.models.whisper.english_normalizer import BasicTextNormalizer
 
@@ -160,6 +184,18 @@ def compute_metrics(pred, processor, metric, normalizer):
 
     wer = metric.compute(predictions=pred_str_norm, references=label_str_norm)
 
+    try:
+        import wandb
+        if wandb.run is not None and len(pred_str) > 0:
+            sample_table = wandb.Table(columns=["ref", "hyp"])
+            for i in range(min(5, len(pred_str))):
+                sample_table.add_data(label_str[i], pred_str[i])
+            wandb.log({
+                "eval_samples": sample_table,
+            })
+    except ImportError:
+        pass
+
     return {"wer_ortho": wer_ortho, "wer": wer}
 
 
@@ -191,6 +227,12 @@ def freeze_decoder_except_embeddings(model):
             p.requires_grad = False
             frozen += p.numel()
     print(f"[freeze] decoder frozen except embeddings ({frozen:,} params will not train)")
+
+
+class EvaluateFirstStepCallback(TrainerCallback):
+    def on_step_begin(self, args, state, control, **kwargs):
+        if state.global_step == 1:
+            control.should_evaluate = True
 
 
 class EmbeddingWarmupCallback(TrainerCallback):
@@ -416,7 +458,13 @@ def parse_arguments():
         "--eval_steps", type=int, help="Number of steps between two evals, if not specified defaults to logging_steps."
     )
     parser.add_argument(
-        "--predict_wer", action="store_true", help="Use WER as the metric for best model instead of loss"
+        "--predict_wer", action="store_true", default=False, help="Predict WER for all eval samples and report metrics. Implies prediction_loss_only=False."
+    )
+    parser.add_argument(
+        "--eval_wer_sample_size", type=int, default=0, help="Number of eval samples to run generation + WER on (via FastEvalWhisperTrainer). 0 disables (uses Seq2SeqTrainer)."
+    )
+    parser.add_argument(
+        "--eval_on_first_step", action="store_true", default=False, help="Run evaluation at step 1 (EvaluateFirstStepCallback)."
     )
     parser.add_argument("--max_eval_set_size", type=int, help="Maximum number of entries to fetch from eval dataset.")
 
@@ -595,8 +643,7 @@ def main():
         bf16=True if args.mixed_precision == "bf16" else None,
         fp16=True if args.mixed_precision == "fp16" else None,
         tf32=True if args.mixed_precision == "tf32" else None,
-        # Configure prediction loss and metric based on predict_wer
-        prediction_loss_only=False if args.predict_wer else True,
+        prediction_loss_only=not (args.predict_wer or args.eval_wer_sample_size > 0),
         # Configure save_total_limit if max_checkpoints_to_keep is provided
         save_total_limit=args.max_checkpoints_to_keep,
         # Configure save_only_model
@@ -611,16 +658,29 @@ def main():
         average_tokens_across_devices=True,
     )
 
-    trainer = Seq2SeqTrainer(
-        args=training_args,
-        model=model,
-        train_dataset=train_set,
-        eval_dataset=eval_set,
-        data_collator=data_collator,
-        compute_metrics=lambda pred: compute_metrics(pred, processor, metric, normalizer),
-        processing_class=processor,
-        compute_loss_func=compute_loss_func,
-    )
+    if args.eval_wer_sample_size > 0:
+        trainer = FastEvalWhisperTrainer(
+            num_gen_samples=args.eval_wer_sample_size,
+            args=training_args,
+            model=model,
+            train_dataset=train_set,
+            eval_dataset=eval_set,
+            data_collator=data_collator,
+            compute_metrics=lambda pred: compute_metrics(pred, processor, metric, normalizer),
+            processing_class=processor,
+            compute_loss_func=compute_loss_func,
+        )
+    else:
+        trainer = Seq2SeqTrainer(
+            args=training_args,
+            model=model,
+            train_dataset=train_set,
+            eval_dataset=eval_set,
+            data_collator=data_collator,
+            compute_metrics=lambda pred: compute_metrics(pred, processor, metric, normalizer),
+            processing_class=processor,
+            compute_loss_func=compute_loss_func,
+        )
 
     # Staged decoder unfreeze: train embeddings only, then release the rest of the decoder.
     # This flips requires_grad mid-run, which is incompatible with DDP unless
@@ -635,6 +695,9 @@ def main():
                 print("[warmup] WARNING: --embedding_warmup_steps under DDP will fail unless "
                       "--ddp_find_unused_parameters is set. Prefer --train_embeddings_only.")
             trainer.add_callback(EmbeddingWarmupCallback(model, args.embedding_warmup_steps))
+
+    if args.eval_on_first_step:
+        trainer.add_callback(EvaluateFirstStepCallback())
 
     resume_from_checkpoint = False
     if args.resume_from_checkpoint:

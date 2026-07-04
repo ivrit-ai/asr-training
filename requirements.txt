@@ -12,8 +12,8 @@ numpy
 openai-whisper
 pydub
 soundfile
-torch
-torchaudio
+torch==2.5.1
+torchaudio==2.5.1
 transformers==4.48.1
 openai
 python-dotenv
@@ -27,13 +27,14 @@ scipy
 tqdm
 pydantic
 accelerate
+wandb
 boto3
 google-cloud-speech
 google-cloud-storage
 amazon-transcribe
 hebrew
 runpod
-stable_ts==2.18.3
+stable_ts
 ctranslate2
 optimum[exporters]
 onnx
