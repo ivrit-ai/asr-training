@@ -57,6 +57,11 @@ def create_app(**kwargs) -> Callable:
     model = faster_whisper.WhisperModel(model_path, **args)
 
     def transcribe_fn(entry):
+        # The harness always wraps a single entry in a list (see process_entry).
+        # This engine does not support true batching, so we unwrap it safely.
+        if isinstance(entry, list):
+            assert len(entry) == 1, f"Expected single-entry list, got {len(entry)} entries"
+            entry = entry[0]
         return transcribe(model, entry)
 
     return transcribe_fn
