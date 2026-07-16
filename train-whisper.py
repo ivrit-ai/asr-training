@@ -164,6 +164,18 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         return batch
 
 
+# Whisper's language/task/timestamp control tokens (e.g. <|he|>, <|transcribe|>,
+# <|notimestamps|>) can survive tokenizer.batch_decode(skip_special_tokens=True)
+# since some are tied to the previous-text-prompt tokens/timestamp tokens which
+# aren't always flagged as "special" by the tokenizer. Strip them explicitly so
+# ref/hyp shown for eyeballing (console + wandb table) are an exact text comparison.
+special_token_display_pattern = re.compile(r"<\|[^|>]*\|>")
+
+
+def strip_special_tokens_for_display(text):
+    return special_token_display_pattern.sub("", text).strip()
+
+
 def compute_metrics(pred, processor, metric, normalizer, trainer_ref=None):
     pred_ids = pred.predictions
     label_ids = pred.label_ids
@@ -190,15 +202,20 @@ def compute_metrics(pred, processor, metric, normalizer, trainer_ref=None):
     if num_samples_to_show > 0:
         print(f"[eval_samples] showing {num_samples_to_show} ref/hyp sample(s):")
         for i in range(num_samples_to_show):
-            print(f"[eval_samples]   ref[{i}]: {label_str[i]!r}")
-            print(f"[eval_samples]   hyp[{i}]: {pred_str[i]!r}")
+            ref_display = strip_special_tokens_for_display(label_str[i])
+            hyp_display = strip_special_tokens_for_display(pred_str[i])
+            print(f"[eval_samples]   ref[{i}]: {ref_display!r}")
+            print(f"[eval_samples]   hyp[{i}]: {hyp_display!r}")
 
     try:
         import wandb
         if wandb.run is not None and len(pred_str) > 0:
             sample_table = wandb.Table(columns=["ref", "hyp"])
             for i in range(num_samples_to_show):
-                sample_table.add_data(label_str[i], pred_str[i])
+                sample_table.add_data(
+                    strip_special_tokens_for_display(label_str[i]),
+                    strip_special_tokens_for_display(pred_str[i]),
+                )
 
             # IMPORTANT: wandb.log() without an explicit `step=` uses its own
             # internal auto-incrementing step counter, which is SEPARATE from
