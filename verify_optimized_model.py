@@ -68,6 +68,19 @@ def main():
 
     # 3) Special-token layout invariants
     print("\n[3] Special-token layout")
+    special_tokens = [
+        "<|endoftext|>",
+        "<|startoftranscript|>",
+        "<|transcribe|>",
+        "<|he|>",
+        "<|startofprev|>",
+        "<|notimestamps|>",
+        "<|0.00|>",
+    ]
+    print("  Special-token IDs:")
+    for token in special_tokens:
+        print(f"    {token} -> {tok.convert_tokens_to_ids(token)}")
+
     nots = tok.convert_tokens_to_ids("<|notimestamps|>")
     results.append(check("notimestamps+1 == <|0.00|>", nots + 1 == tok.convert_tokens_to_ids("<|0.00|>")))
     results.append(check("last id == <|30.00|>", vocab - 1 == tok.convert_tokens_to_ids("<|30.00|>")))
