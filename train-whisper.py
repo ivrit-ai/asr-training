@@ -164,7 +164,7 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         return batch
 
 
-def compute_metrics(pred, processor, metric, normalizer):
+def compute_metrics(pred, processor, metric, normalizer, trainer_ref=None):
     pred_ids = pred.predictions
     label_ids = pred.label_ids
 
@@ -184,15 +184,42 @@ def compute_metrics(pred, processor, metric, normalizer):
 
     wer = metric.compute(predictions=pred_str_norm, references=label_str_norm)
 
+    # Always echo a few ref/hyp pairs to stdout so they land in the captured
+    # console log even if the wandb Table logging below fails/gets dropped.
+    num_samples_to_show = min(5, len(pred_str))
+    if num_samples_to_show > 0:
+        print(f"[eval_samples] showing {num_samples_to_show} ref/hyp sample(s):")
+        for i in range(num_samples_to_show):
+            print(f"[eval_samples]   ref[{i}]: {label_str[i]!r}")
+            print(f"[eval_samples]   hyp[{i}]: {pred_str[i]!r}")
+
     try:
         import wandb
         if wandb.run is not None and len(pred_str) > 0:
             sample_table = wandb.Table(columns=["ref", "hyp"])
-            for i in range(min(5, len(pred_str))):
+            for i in range(num_samples_to_show):
                 sample_table.add_data(label_str[i], pred_str[i])
+
+            # IMPORTANT: wandb.log() without an explicit `step=` uses its own
+            # internal auto-incrementing step counter, which is SEPARATE from
+            # the step counter the HF Trainer's WandbCallback uses (it logs
+            # scalars with an explicit step=state.global_step, jumping by
+            # eval_steps/logging_steps each time). Left unstepped, this call
+            # only advances by +1 per eval invocation, so it quickly falls
+            # behind the explicit-step timeline. Per wandb docs, a run can
+            # only write to the "current" and "next" step - it cannot write
+            # backward - so once our counter falls behind, every subsequent
+            # call here is silently dropped and the table stops updating.
+            # Pinning to the trainer's real global_step keeps both timelines
+            # in sync so the table keeps recording for the full run.
+            log_kwargs = {}
+            trainer = trainer_ref.get("trainer") if trainer_ref is not None else None
+            if trainer is not None:
+                log_kwargs["step"] = trainer.state.global_step
+
             wandb.log({
                 "eval_samples": sample_table,
-            })
+            }, **log_kwargs)
     except ImportError:
         pass
 
@@ -658,6 +685,13 @@ def main():
         average_tokens_across_devices=True,
     )
 
+    # Holder used so compute_metrics can look up the trainer's current
+    # global_step (needed to keep wandb table logging on the same step
+    # timeline as the trainer's own scalar metric logging - see comment
+    # in compute_metrics for why this matters). Populated right after the
+    # trainer is constructed below.
+    trainer_ref = {}
+
     if args.eval_wer_sample_size > 0:
         trainer = FastEvalWhisperTrainer(
             num_gen_samples=args.eval_wer_sample_size,
@@ -666,7 +700,7 @@ def main():
             train_dataset=train_set,
             eval_dataset=eval_set,
             data_collator=data_collator,
-            compute_metrics=lambda pred: compute_metrics(pred, processor, metric, normalizer),
+            compute_metrics=lambda pred: compute_metrics(pred, processor, metric, normalizer, trainer_ref),
             processing_class=processor,
             compute_loss_func=compute_loss_func,
         )
@@ -677,10 +711,11 @@ def main():
             train_dataset=train_set,
             eval_dataset=eval_set,
             data_collator=data_collator,
-            compute_metrics=lambda pred: compute_metrics(pred, processor, metric, normalizer),
+            compute_metrics=lambda pred: compute_metrics(pred, processor, metric, normalizer, trainer_ref),
             processing_class=processor,
             compute_loss_func=compute_loss_func,
         )
+    trainer_ref["trainer"] = trainer
 
     # Staged decoder unfreeze: train embeddings only, then release the rest of the decoder.
     # This flips requires_grad mid-run, which is incompatible with DDP unless
