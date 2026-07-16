@@ -1,3 +1,5 @@
+import re
+import unicodedata
 import json
 from random import shuffle
 import logging
@@ -5,6 +7,7 @@ from pathlib import Path
 from typing import Iterator
 import uuid
 
+from hebrew import Hebrew
 from tqdm import tqdm
 from stable_whisper.result import WhisperResult, Segment
 from stable_whisper.audio import AudioLoader
@@ -97,6 +100,56 @@ def load_audio_in_whisper_format(file: str, sr: int = WHISPER_EXPECTED_SAMPLE_RA
         raise RuntimeError(f"Failed to load audio: {e.stderr.decode()}") from e
 
     return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
+
+def normalize_asr_text(text: str) -> str:
+    if not text:
+        return ""
+        
+    # 1. Normalize typographic characters & spaces
+    replacements = {
+        '\xa0': ' ',     # No-break space
+        '\u200b': '',    # Zero-width space
+        '\u200d': '',    # Zero-width joiner
+        '\u200e': '',    # LTR mark
+        '\u200f': '',    # RTL mark
+        '‘': "'", '’': "'", '´': "'", # Smart single quotes / isolated accents
+        '“': '"', '”': '"', '„': '"', # Smart double quotes
+        '–': '-', '—': '-', '־': '-', # Dashes and Hebrew Maqaf
+        '…': '...',      # Ellipsis
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+        
+    # 2. Latin Accent Normalization 
+    # Decomposes characters (NFD), then drops the combining accent marks (Mn)
+    text = ''.join(c for c in unicodedata.normalize('NFD', text) 
+                   if unicodedata.category(c) != 'Mn')
+                   
+    # 3. Hebrew Library Normalization
+    # - normalize(): Handles presentation forms (e.g., שׁ -> ש) and ligatures
+    # - no_niqqud() & no_taamim(): Strips all vowels and cantillation marks
+    text_obj = Hebrew(text)
+    text = text_obj.normalize().no_niqqud().no_taamim().string
+    
+    # 4. Strict Whitelist Filter
+    # Keeps ONLY: English, Hebrew base letters, Geresh/Gershayim, Digits, 
+    # basic punctuation, and your specified symbols.
+    whitelist_pattern = re.compile(
+        r'[^'                  # Match anything NOT in this list:
+        r'a-zA-Z0-9'           # English & Digits
+        r'\u05D0-\u05EA'       # Hebrew Aleph-Tav
+        r'\u05F3\u05F4'        # Hebrew Geresh (׳) & Gershayim (״)
+        r'\s'                  # Whitespace (spaces, tabs, newlines)
+        r'!\"\'(),\-.:;?<>|/'      # Basic Punctuation + special tokens for Whisper
+        r'$%₪&'                # Approved Symbols
+        r']'
+    )
+    text = whitelist_pattern.sub('', text)
+    
+    # 5. Clean up extra whitespace left behind by removed characters
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    return text
 
 
 def get_segment_word_scores(segment: Segment) -> list[float]:
@@ -422,7 +475,7 @@ def generate_examples_from_slices(
                 for segment in slice["segments"]:
                     slice_text += get_timestamp_token_text(segment["start"])
                     if "text" in segment:
-                        slice_text += f'{segment["text"]}{get_timestamp_token_text(segment["end"])}'
+                        slice_text += f'{normalize_asr_text(segment["text"])}{get_timestamp_token_text(segment["end"])}'
                 all_word_scores = [score for segment in slice["segments"] for score in segment.get("word_scores", [])]
                 segments_quality_score = calculate_median_quality_score(all_word_scores)
                 slice_audio_data = get_slice_audio_data(audio_loader, slice, slice_length)
