@@ -147,7 +147,11 @@ def normalize_asr_text(text: str) -> str:
     text = whitelist_pattern.sub('', text)
     
     # 5. Clean up extra whitespace left behind by removed characters
-    text = re.sub(r'\s+', ' ', text).strip()
+    # Note: intentionally not stripping leading/trailing whitespace here -
+    # segment text from Whisper carries meaningful boundary spaces (e.g. a
+    # leading space) that must be preserved when concatenated with the
+    # surrounding timestamp tokens in generate_examples_from_slices.
+    text = re.sub(r'\s+', ' ', text)
     
     return text
 
