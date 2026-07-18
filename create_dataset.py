@@ -695,7 +695,13 @@ def prepare_training_dataset(
         try:
             dataset_features = Features(
                 {
-                    "audio": AudioColumnType(),
+                    # Set the target sampling rate on the audio feature UP FRONT so
+                    # each shard is written with the correct feature metadata during
+                    # parallel generation. This avoids a final, single-threaded
+                    # cast_column() over the whole concatenated dataset, which
+                    # rewrites every audio blob in the parent process and was the
+                    # dominant end-of-run bottleneck on large datasets.
+                    "audio": AudioColumnType(sampling_rate=WHISPER_EXPECTED_SAMPLE_RATE),
                     "transcript": ValueColumnType(dtype="string"),
                     "metadata": {
                         "seek": ValueColumnType(dtype="float32"),
@@ -730,10 +736,11 @@ def prepare_training_dataset(
     if not all_datasets:
         return None
 
+    # concatenate_datasets performs a zero-copy Arrow table concat over the
+    # memory-mapped shards. The audio feature already carries the target
+    # sampling rate (set in dataset_features above), so NO cast_column is needed
+    # here - avoiding a full single-threaded rewrite of all audio bytes.
     examples_dataset = concatenate_datasets(all_datasets)
-    examples_dataset = examples_dataset.cast_column(
-        "audio", AudioColumnType(sampling_rate=WHISPER_EXPECTED_SAMPLE_RATE)
-    )
 
     return examples_dataset
 
