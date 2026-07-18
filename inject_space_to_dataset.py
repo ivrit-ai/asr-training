@@ -15,9 +15,17 @@ from pathlib import Path
 TIMESTAMP_BEFORE_TEXT = re.compile(r"(<\|\d+(?:\.\d+)?\|>)(?=[^<\s])")
 
 
-def restore_timestamp_spaces(transcripts: list[str]) -> list[str]:
-    """Insert a space after a timestamp only when regular text follows it."""
-    return [TIMESTAMP_BEFORE_TEXT.sub(r"\1 ", transcript) for transcript in transcripts]
+def restore_timestamp_spaces(transcripts: list[str]) -> dict[str, list[str]]:
+    """Rewrite the selected ``transcript`` column passed by ``Dataset.map``.
+
+    ``input_columns="transcript"`` makes a batched map call pass this function
+    a list of transcript strings rather than a dictionary of dataset columns.
+    ``Dataset.map`` still requires replacement values to be returned in a
+    dictionary keyed by the updated column name.
+    """
+    return {
+        "transcript": [TIMESTAMP_BEFORE_TEXT.sub(r"\1 ", transcript) for transcript in transcripts]
+    }
 
 
 def main() -> None:
