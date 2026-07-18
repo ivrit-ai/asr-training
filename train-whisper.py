@@ -2,6 +2,7 @@
 # coding: utf-8
 
 import argparse
+import os
 import re
 from dataclasses import dataclass
 from functools import partial
@@ -611,7 +612,7 @@ def main():
         processor=processor, decoder_start_token_id=processor.tokenizer.convert_tokens_to_ids("<|startoftranscript|>")
     )
 
-    metric = evaluate.load("wer")
+    metric = evaluate.load("wer", experiment_id=f"rank{os.environ.get('RANK', '0')}")
     normalizer = BasicTextNormalizer()
 
     if args.use_qlora:

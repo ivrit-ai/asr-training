@@ -74,7 +74,7 @@ This script allows you to convert ASR models (like Whisper) to various formats i
 ## Installation
 
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
 ## Usage

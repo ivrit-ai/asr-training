@@ -4,7 +4,60 @@ version = "0.1.0"
 description = "ASR training recipes created for ivrit.ai"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "audiosample==2.2.6",
+    "av>=12.3.0,<14",
+    "bitsandbytes",
+    "datasets<4.0.0",
+    "faster-whisper",
+    "librosa",
+    "mutagen",
+    "numpy",
+    "openai-whisper",
+    "pydub",
+    "soundfile",
+    "torch",
+    "torchaudio",
+    "transformers==4.48.1",
+    "openai",
+    "python-dotenv",
+    "retry",
+    "jiwer",
+    "pandas",
+    "peft",
+    "evaluate",
+    "webvtt-py",
+    "scipy",
+    "tqdm",
+    "pydantic",
+    "accelerate",
+    "boto3",
+    "google-cloud-speech",
+    "google-cloud-storage",
+    "amazon-transcribe",
+    "hebrew",
+    "runpod",
+    "stable_ts==2.18.3",
+    "ctranslate2",
+    "optimum[exporters]",
+    "onnx",
+    "onnxruntime",
+    "wandb",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-timeout",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu129" }
+torchaudio = { index = "pytorch-cu129" }
 
 [tool.black]
 line-length = 120
