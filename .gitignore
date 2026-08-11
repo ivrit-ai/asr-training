@@ -23,3 +23,6 @@ config/
 
 # Local Tracker outputs
 wandb
+
+# new
+.venv*
