@@ -15,16 +15,18 @@ def create_app(**kwargs) -> Callable:
         results = []
         for entry in entries:
             audio = entry["audio"]
-            if isinstance(audio, dict):
+            if isinstance(audio, str):
+                # Load audio from a file path
+                arr, sr = librosa.load(audio, sr=None, mono=True)
+            elif isinstance(audio, dict):
                 arr = audio["array"]
                 sr = audio["sampling_rate"]
             else:
                 arr = audio
                 sr = 16000
-                
+
             # Ensure the audio is at 16kHz for Whisper
             resampled = librosa.resample(arr, orig_sr=sr, target_sr=16000)
-            
             t0 = time.perf_counter()
             
             # Run inference natively on Apple Silicon GPU
