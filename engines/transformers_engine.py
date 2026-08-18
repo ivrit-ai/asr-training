@@ -17,9 +17,8 @@ def create_app(**kwargs) -> Callable:
     processor = WhisperProcessor.from_pretrained(model_path)
 
     def transcribe(entries):
-        # This function supports batch processing, but still does not support long-form audio files. 
-        # Benchmarking with this on audio files that are longer than 30 seconds will result cutting 
-        #  the audio file into the first 30 seconds and then high WER\WIL.
+        # Supports batch processing, but still does not support long-form audio files.
+        # Benchmarking audio longer than 30 seconds may truncate it to the first 30 seconds and yield high WER/WIL.    
         if not isinstance(entries, list):
             entries = [entries]
 
