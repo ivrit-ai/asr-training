@@ -16,10 +16,19 @@ def create_app(**kwargs) -> Callable:
     model.to(device)
     processor = WhisperProcessor.from_pretrained(model_path)
 
-    def transcribe(entry):
-        audio_resample = librosa.resample(
-            entry["audio"]["array"], orig_sr=entry["audio"]["sampling_rate"], target_sr=16000
-        )
+    def transcribe(entries):
+        # Supports batch processing, but still does not support long-form audio files.
+        # Benchmarking audio longer than 30 seconds may truncate it to the first 30 seconds and yield high WER/WIL.    
+        if not isinstance(entries, list):
+            entries = [entries]
+
+        audio_resample = []
+        for entry in entries:
+            single_audio_resample = librosa.resample(
+                entry["audio"]["array"], orig_sr=entry["audio"]["sampling_rate"], target_sr=16000
+            )
+            audio_resample.append(single_audio_resample)
+
         input_features = processor(audio_resample, sampling_rate=16000, return_tensors="pt").input_features
         input_features = input_features.to(model.device)
 
@@ -28,6 +37,6 @@ def create_app(**kwargs) -> Callable:
         transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)
         transcription_time = time.time() - start_time
 
-        return transcription[0], transcription_time
+        return [(single_transcription, transcription_time / len(transcription)) for single_transcription in transcription]
 
     return transcribe

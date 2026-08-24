@@ -38,3 +38,4 @@ ctranslate2
 optimum[exporters]
 onnx
 onnxruntime
+mlx-whisper
