@@ -389,16 +389,13 @@ def evaluate_model(transcribe_fn, ds, text_column, num_workers=1, benchmark_timi
             batch = list(ds.select(batch_indices))
             process_args.append((i, batch, transcribe_fn, text_column, normalizer, benchmark_timing))
 
-    # Process entries in parallel with progress tracking
-    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-        # Submit tasks
-        futures = [executor.submit(process_entry, arg) for arg in process_args]
-
+    if num_workers == 1:
+        # Single-threaded processing
         # Use tqdm to track progress
         entries_data = []
         with tqdm(total=len(ds), desc="Processing entries") as pbar:
-            for future in concurrent.futures.as_completed(futures):
-                batch_results = future.result()
+            for arg in process_args:
+                batch_results = process_entry(arg)
                 entries_data.extend(batch_results)
                 if batch_results:
                     last_wer = batch_results[-1]["wer"]
@@ -406,8 +403,26 @@ def evaluate_model(transcribe_fn, ds, text_column, num_workers=1, benchmark_timi
                     pbar.set_postfix(last_wer=f"{last_wer:.5f}", last_wil=f"{last_wil:.5f}")
                 pbar.update(len(batch_results))
 
-    # Sort results by ID to maintain original order
-    entries_data.sort(key=lambda x: x["id"])
+    else:
+        # Process entries in parallel with progress tracking
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+            # Submit tasks
+            futures = [executor.submit(process_entry, arg) for arg in process_args]
+
+            # Use tqdm to track progress
+            entries_data = []
+            with tqdm(total=len(ds), desc="Processing entries") as pbar:
+                for future in concurrent.futures.as_completed(futures):
+                    batch_results = future.result()
+                    entries_data.extend(batch_results)
+                    if batch_results:
+                        last_wer = batch_results[-1]["wer"]
+                        last_wil = batch_results[-1]["wil"]
+                        pbar.set_postfix(last_wer=f"{last_wer:.5f}", last_wil=f"{last_wil:.5f}")
+                    pbar.update(len(batch_results))
+
+        # Sort results by ID to maintain original order
+        entries_data.sort(key=lambda x: x["id"])
 
     return pandas.DataFrame(entries_data)
 
