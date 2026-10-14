@@ -37,7 +37,10 @@ class HebrewTextNormalizer:
     def __call__(self, text):
         text = clean_some_unicode_from_text(text)
         text = remove_niqqud(text)
-        text = text.replace('"', "").replace("'", "")
+        # Delete double-quote variants before Whisper can turn punctuation into spaces.
+        # Hebrew gershayim and typographic quotes inside acronyms join their letters.
+        text = text.translate(str.maketrans("", "", '\u0022\u05f4\u201c\u201d\u201e\u201f\u00ab\u00bb\uff02'))
+        text = text.replace("'", "")
 
         return self.whisper_normalizer(text)
 
